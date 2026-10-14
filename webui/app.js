@@ -285,7 +285,18 @@ addEventListener('keydown', (e) => {
   if (typingInField()) return; // let the IME field work
   const named = NAMED[e.code];
   if (named) { e.preventDefault(); sendKey(named, 0, true); return; }
-  if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); sendText(e.key); }
+  // A printable key with a modifier held (Ctrl+C, Alt+F, Meta+K, …) is a KEY
+  // event carrying the character, NOT a Text event: the daemon presses the
+  // named key while the modifier is held (the modifier keydown already fired).
+  if (e.key.length === 1) {
+    e.preventDefault();
+    if (e.ctrlKey || e.altKey || e.metaKey) {
+      sendKey(e.key, e.key.codePointAt(0), true);
+      sendKey(e.key, e.key.codePointAt(0), false);
+    } else {
+      sendText(e.key);
+    }
+  }
 });
 addEventListener('keyup', (e) => {
   if (typingInField()) return;
