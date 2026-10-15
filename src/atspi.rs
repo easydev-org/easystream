@@ -18,6 +18,9 @@ const A11Y_BUS_PATH: &str = "/org/a11y/bus";
 const A11Y_BUS_IFACE: &str = "org.a11y.Bus";
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const REGISTRY_PATH: &str = "/org/a11y/atspi/registry";
+/// ROOT_PATH is the fixed object path of the registry-as-root accessible in the
+/// at-spi2-core versions that dropped GetDesktop.
+const ROOT_PATH: &str = "/org/a11y/atspi/registry";
 const REGISTRY_IFACE: &str = "org.a11y.atspi.Registry";
 const ACCESSIBLE_IFACE: &str = "org.a11y.atspi.Accessible";
 const ACTION_IFACE: &str = "org.a11y.atspi.Action";
@@ -52,10 +55,18 @@ impl Atspi {
 
     fn desktop(&self) -> Result<Ref2, String> {
         let proxy = self.conn.with_proxy(REGISTRY, REGISTRY_PATH, Duration::from_secs(5));
-        let root: (String, Path) = proxy
-            .method_call(REGISTRY_IFACE, "GetDesktop", (0i32,))
-            .map_err(|e| format!("GetDesktop: {e}"))?;
-        Ok(Ref2 { bus: root.0, path: root.1.to_string() })
+        // `GetDesktop(0)` is the classic way to reach the root accessible. Newer
+        // at-spi2-core (2.5x, e.g. Debian trixie) REMOVED it — the call fails
+        // with 'Method "GetDesktop" ... doesn\'t exist'. In that version the
+        // registry itself is the root: its fixed object path is the desktop,
+        // reachable over the SAME connection. Fall back to it.
+        match proxy.method_call::<(String, Path), _, _, _>(REGISTRY_IFACE, "GetDesktop", (0i32,)) {
+            Ok(root) => Ok(Ref2 { bus: root.0, path: root.1.to_string() }),
+            Err(_) => {
+                // The registry's own name/path IS the root accessible.
+                Ok(Ref2 { bus: REGISTRY.to_string(), path: ROOT_PATH.to_string() })
+            }
+        }
     }
 
     /// children returns the child refs of a node.

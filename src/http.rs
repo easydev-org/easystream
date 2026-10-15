@@ -214,8 +214,9 @@ fn with_input(f: impl FnOnce(&crate::est::Input)) -> Result<String, String> {
 /// clipboard_get reads the system clipboard.
 ///
 /// Windows uses the real Win32 clipboard (shared with the est 0x30-0x32
-/// frames); Linux shells out to xclip/xsel, which is what every X session
-/// ships. Both are best-effort: a missing tool is a clear error, not a panic.
+/// frames). Linux shells out: xclip/xsel on X11, wl-paste on Wayland (the
+/// wlroots sandbox has no X clipboard tool). Best-effort: a missing tool is a
+/// clear error, not a panic.
 #[cfg(windows)]
 fn clipboard_get() -> Result<String, String> {
     Ok(crate::win::clipboard::get())
@@ -224,6 +225,7 @@ fn clipboard_get() -> Result<String, String> {
 #[cfg(not(windows))]
 fn clipboard_get() -> Result<String, String> {
     for (cmd, args) in [
+        ("wl-paste", vec!["--no-newline"]),
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
     ] {
@@ -233,7 +235,7 @@ fn clipboard_get() -> Result<String, String> {
             }
         }
     }
-    Err("clipboard get: neither xclip nor xsel succeeded".into())
+    Err("clipboard get: no wl-paste/xclip/xsel succeeded".into())
 }
 
 /// clipboard_set writes the system clipboard.
@@ -247,6 +249,7 @@ fn clipboard_set(text: &str) -> Result<String, String> {
 fn clipboard_set(text: &str) -> Result<String, String> {
     use std::io::Write;
     for (cmd, args) in [
+        ("wl-copy", vec![]),
         ("xclip", vec!["-selection", "clipboard"]),
         ("xsel", vec!["--clipboard", "--input"]),
     ] {
@@ -265,7 +268,7 @@ fn clipboard_set(text: &str) -> Result<String, String> {
             }
         }
     }
-    Err("clipboard set: neither xclip nor xsel succeeded".into())
+    Err("clipboard set: no wl-copy/xclip/xsel succeeded".into())
 }
 
 fn input_click(query: &str) -> Result<String, String> {
