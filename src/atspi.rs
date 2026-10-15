@@ -20,7 +20,7 @@ const REGISTRY: &str = "org.a11y.atspi.Registry";
 const REGISTRY_PATH: &str = "/org/a11y/atspi/registry";
 /// ROOT_PATH is the fixed object path of the registry-as-root accessible in the
 /// at-spi2-core versions that dropped GetDesktop.
-const ROOT_PATH: &str = "/org/a11y/atspi/registry";
+const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 const REGISTRY_IFACE: &str = "org.a11y.atspi.Registry";
 const ACCESSIBLE_IFACE: &str = "org.a11y.atspi.Accessible";
 const ACTION_IFACE: &str = "org.a11y.atspi.Action";
@@ -72,6 +72,13 @@ impl Atspi {
     /// children returns the child refs of a node.
     fn children(&self, node: &Ref2) -> Result<Vec<Ref2>, String> {
         let proxy = self.conn.with_proxy(node.bus.as_str(), node.path.as_str(), Duration::from_secs(5));
+        // Newer at-spi2-core (Debian trixie) dropped the `Children` PROPERTY;
+        // it is now the `GetChildren()` METHOD on org.a11y.atspi.Accessible
+        // (verified against the registry's introspection XML). Try the method
+        // first, then the legacy property.
+        if let Ok((kids,)) = proxy.method_call::<(Vec<(String, Path)>,), _, _, _>(ACCESSIBLE_IFACE, "GetChildren", ()) {
+            return Ok(kids.into_iter().map(|(bus, path)| Ref2 { bus, path: path.to_string() }).collect());
+        }
         let (kids,): (Variant<Vec<(String, Path)>>,) = proxy
             .method_call(PROPS_IFACE, "Get", (ACCESSIBLE_IFACE, "Children"))
             .map_err(|e| format!("Children: {e}"))?;
