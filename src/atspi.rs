@@ -251,9 +251,17 @@ impl Atspi {
 /// parse_selector understands `role[name="x"]`, `role`, `name="x"` and `#name`.
 fn parse_selector(sel: &str) -> (String, String) {
     let sel = sel.trim();
+    // `*` (and the empty selector) match ANY element. Without this the role
+    // filter became the literal "*" and nothing matched — the "no match for *"
+    // that every find?sel=* returned.
+    if sel.is_empty() || sel == "*" {
+        return (String::new(), String::new());
+    }
     if let Some(eq) = sel.find('=') {
         let role = sel[..eq].trim().trim_start_matches('[').to_string();
         let name = sel[eq + 1..].trim().trim_matches('"').trim_end_matches(']').to_string();
+        // `[name="x"]` / `*[name="x"]` also mean "any role".
+        let role = if role == "*" || role.is_empty() { String::new() } else { role };
         return (role, name);
     }
     (sel.to_string(), String::new())
