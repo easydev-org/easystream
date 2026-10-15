@@ -110,8 +110,18 @@ fn respond_bytes(reader: &mut BufReader<TcpStream>, status: u16, ctype: &str, bo
 /// avoids holding a capture session (and its X shm segment) open forever.
 fn screenshot_png(region: &str) -> Result<Vec<u8>, String> {
     let cap = crate::est::Capture::open()?;
-    let (w, h) = cap.size();
+    let (mut w, mut h) = cap.size();
     let px = cap.grab()?; // BGRA, top-down
+    // `cap.size()` is the DISPLAY size; the grabbed buffer is authoritative.
+    // They can disagree (a scale/geometry change mid-flight), and trusting the
+    // former made the crop index past the end of the buffer -> panic.
+    if w == 0 || h == 0 || (w * h * 4) as usize != px.len() {
+        if w != 0 && px.len() % (w as usize * 4) == 0 {
+            h = (px.len() / (w as usize * 4)) as u32;
+        } else {
+            return Err(format!("capture size mismatch: {}x{} vs {} bytes", w, h, px.len()));
+        }
+    }
     let png = crate::png::encode_bgra(w, h, &px);
     if region.is_empty() {
         return Ok(png);
@@ -146,7 +156,9 @@ fn q(query: &str, key: &str) -> String {
 }
 
 fn a11y_route(reader: &mut BufReader<TcpStream>, path: &str, query: &str, a11y: A11y) -> Result<(), String> {
-    let mut guard = a11y.lock().unwrap();
+    // A poisoned lock (a panic while a previous request held it) must NOT kill
+    // every later request: recover the inner value and carry on.
+    let mut guard = a11y.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(crate::a11y::Backend::open()?);
     }
