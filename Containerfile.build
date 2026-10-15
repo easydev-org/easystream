@@ -1,0 +1,31 @@
+# Build the easystream daemon (Linux / X11 / Wayland) with the SHARED web UI
+# embedded.
+#
+# The UI is not vendored in this repo: it is fetched from the single source of
+# truth (easydev-org/easystream-webui) here, at build time, and lands in
+# rust/webui/ where `include_str!` inlines it into the binary.
+#
+#   buildctl build --frontend dockerfile.v0 \
+#     --local context=. --local dockerfile=. \
+#     --opt filename=Containerfile.build \
+#     --opt build-arg:WEBUI_REF=main \
+#     --opt build-arg:HTTPS_PROXY=http://mihomo.develop.svc.cluster.local:7890
+ARG REGISTRY=artifact.worker.svc.cluster.local
+FROM ${REGISTRY}/toolchain/rust:latest
+
+ARG WEBUI_REF=main
+ARG HTTPS_PROXY
+ARG HTTP_PROXY
+ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+WORKDIR /src
+COPY rust/ /src/
+# Fetch the shared UI into rust/webui/ (build-webui.sh is in the repo root).
+COPY build-webui.sh /src/build-webui.sh
+RUN bash /src/build-webui.sh && ls -la /src/rust/webui
+
+RUN cargo build --release --manifest-path /src/Cargo.toml
+# The single artefact the sandbox image ships.
+RUN cp /src/target/release/easystream /easystream
