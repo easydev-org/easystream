@@ -93,6 +93,46 @@ fn respond_text(reader: &mut BufReader<TcpStream>, status: u16, ctype: &str, bod
     s.flush().map_err(|e| e.to_string())
 }
 
+fn respond_bytes(reader: &mut BufReader<TcpStream>, status: u16, ctype: &str, body: &[u8]) -> Result<(), String> {
+    let mut s = reader.get_ref();
+    let head = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        if status == 200 { "OK" } else { "Error" },
+        body.len()
+    );
+    s.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+    s.write_all(body).map_err(|e| e.to_string())?;
+    s.flush().map_err(|e| e.to_string())
+}
+
+/// screenshot_png captures the screen and encodes it as a PNG. A fresh
+/// capture handle is opened per call: screenshots are rare one-shots and this
+/// avoids holding a capture session (and its X shm segment) open forever.
+fn screenshot_png(region: &str) -> Result<Vec<u8>, String> {
+    let cap = crate::est::Capture::open()?;
+    let (w, h) = cap.size();
+    let px = cap.grab()?; // BGRA, top-down
+    let png = crate::png::encode_bgra(w, h, &px);
+    if region.is_empty() {
+        return Ok(png);
+    }
+    // A region was requested: decode nothing, just crop by re-encoding a
+    // sub-rectangle. (Kept simple: re-encode the cropped BGRA.)
+    let nums: Vec<i64> = region.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    if nums.len() != 4 {
+        return Err("region must be X,Y,W,H".into());
+    }
+    let (rx, ry, rw, rh) = (nums[0].max(0) as u32, nums[1].max(0) as u32, nums[2].max(1) as u32, nums[3].max(1) as u32);
+    let (rx, ry) = (rx.min(w.saturating_sub(1)), ry.min(h.saturating_sub(1)));
+    let (rw, rh) = (rw.min(w - rx), rh.min(h - ry));
+    let mut crop = Vec::with_capacity((rw * rh * 4) as usize);
+    for y in ry..ry + rh {
+        let off = ((y * w + rx) * 4) as usize;
+        crop.extend_from_slice(&px[off..off + (rw * 4) as usize]);
+    }
+    Ok(crate::png::encode_bgra(rw, rh, &crop))
+}
+
 fn q(query: &str, key: &str) -> String {
     for pair in query.split('&') {
         let mut it = pair.splitn(2, '=');
@@ -112,6 +152,13 @@ fn a11y_route(reader: &mut BufReader<TcpStream>, path: &str, query: &str, a11y: 
     }
     let be = guard.as_ref().unwrap();
     let pid: u32 = q(query, "pid").parse().unwrap_or(0);
+    // Screenshot returns PNG bytes, not text: handle it before the text table.
+    if path == "/a11y/screenshot" {
+        return match screenshot_png(&q(query, "region")) {
+            Ok(png) => respond_bytes(reader, 200, "image/png", &png),
+            Err(e) => respond_text(reader, 500, "text/plain; charset=utf-8", &e),
+        };
+    }
     let result: Result<String, String> = match path {
         "/a11y/apps" => be.apps(),
         "/a11y/tree" => be.tree(pid, q(query, "depth").parse().unwrap_or(0)),
@@ -127,7 +174,13 @@ fn a11y_route(reader: &mut BufReader<TcpStream>, path: &str, query: &str, a11y: 
             let v = q(query, "value");
             be.action(pid, &q(query, "sel"), &q(query, "action"), if v.is_empty() { None } else { Some(&v) })
         }
-        "/a11y/clipboard" => Err("clipboard over http: not wired".into()),
+        // Clipboard: `?set=TEXT` writes, otherwise reads. The daemon's est
+        // connection already owns a clipboard implementation (the real Win32
+        // one on Windows, an in-process one elsewhere), so share it.
+        "/a11y/clipboard" => {
+            let set = q(query, "set");
+            if set.is_empty() { clipboard_get() } else { clipboard_set(&set) }
+        }
         "/a11y/click" => input_click(query),
         "/a11y/type" => input_text(query),
         "/a11y/key" => input_key(query),
@@ -156,6 +209,63 @@ fn with_input(f: impl FnOnce(&crate::est::Input)) -> Result<String, String> {
         }
         None => Err("no input backend".into()),
     }
+}
+
+/// clipboard_get reads the system clipboard.
+///
+/// Windows uses the real Win32 clipboard (shared with the est 0x30-0x32
+/// frames); Linux shells out to xclip/xsel, which is what every X session
+/// ships. Both are best-effort: a missing tool is a clear error, not a panic.
+#[cfg(windows)]
+fn clipboard_get() -> Result<String, String> {
+    Ok(crate::win::clipboard::get())
+}
+
+#[cfg(not(windows))]
+fn clipboard_get() -> Result<String, String> {
+    for (cmd, args) in [
+        ("xclip", vec!["-selection", "clipboard", "-o"]),
+        ("xsel", vec!["--clipboard", "--output"]),
+    ] {
+        if let Ok(out) = std::process::Command::new(cmd).args(&args).output() {
+            if out.status.success() {
+                return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+            }
+        }
+    }
+    Err("clipboard get: neither xclip nor xsel succeeded".into())
+}
+
+/// clipboard_set writes the system clipboard.
+#[cfg(windows)]
+fn clipboard_set(text: &str) -> Result<String, String> {
+    crate::win::clipboard::set(text);
+    Ok("ok".into())
+}
+
+#[cfg(not(windows))]
+fn clipboard_set(text: &str) -> Result<String, String> {
+    use std::io::Write;
+    for (cmd, args) in [
+        ("xclip", vec!["-selection", "clipboard"]),
+        ("xsel", vec!["--clipboard", "--input"]),
+    ] {
+        if let Ok(mut child) = std::process::Command::new(cmd)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut si) = child.stdin.take() {
+                let _ = si.write_all(text.as_bytes());
+            }
+            if let Ok(st) = child.wait() {
+                if st.success() {
+                    return Ok("ok".into());
+                }
+            }
+        }
+    }
+    Err("clipboard set: neither xclip nor xsel succeeded".into())
 }
 
 fn input_click(query: &str) -> Result<String, String> {
