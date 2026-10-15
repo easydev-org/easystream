@@ -66,40 +66,49 @@ def run(base):
     # An EMPTY list is legitimate: a bare X11/Wayland desktop has no ATK apps
     # registered with AT-SPI (xterm is Xt, not ATK). Only the FORMAT is
     # mandatory when apps exist.
+    # The identifier is a pid (Windows/macOS) OR a D-Bus bus name (":1.1") on
+    # newer at-spi2-core. Both are opaque to the caller; only "id<TAB>name" is
+    # required.
     c.check(
-        "apps: pid<TAB>name",
-        all(len(l.split("\t")) >= 2 and l.split("\t")[0].isdigit() for l in lines[:5]),
+        "apps: id<TAB>name",
+        all(len(l.split("\t")) >= 2 and l.split("\t")[0] for l in lines[:5]),
         lines[:2],
     )
 
-    # A pid to use for the tree/find checks: the focused one when marked.
-    pid = ""
+    # The first field is the app identifier: a pid on Windows/macOS, a D-Bus
+    # bus name (":1.1") on newer at-spi2-core, where the pid is no longer
+    # recoverable. It goes into ?app= (the pid form still works too).
+    #
+    # Pick the first app that actually HAS a walkable tree: system helpers like
+    # macOS's loginwindow expose no window, so their tree is empty and that is
+    # not a failure of the daemon.
+    app = ""
     for l in lines:
-        parts = l.split("\t")
-        # pid 0 is not a real process (some registries list a helper with pid 0);
-        # a tree walk needs a real pid.
-        if len(parts) >= 3 and "focused" in parts[2] and parts[0] != "0":
-            pid = parts[0]
+        cand = l.split("\t")[0]
+        st, _, body = get(base, "/a11y/tree", depth=3, app=cand)
+        # A tree with only the root line (e.g. macOS loginwindow) has no
+        # elements to find, so its find is legitimately empty — keep looking.
+        if st == 200 and len(body.decode("utf-8", "replace").strip().splitlines()) > 1:
+            app = cand
             break
-    if not pid and lines:
-        cand = lines[0].split("\t")[0]
-        pid = cand if cand != "0" else ""
+    if not app and lines:
+        app = lines[0].split("\t")[0]
 
     # App-dependent checks: skip on a desktop with no ATK apps (the daemon has
     # nothing to walk, so an empty result is correct, not a failure).
-    if not pid:
+    if not app:
         c.check("apps: no ATK apps on this bare desktop (skipping tree/find)", True)
         return c.report()
 
     # ── /a11y/tree: box-drawing text ────────────────────────────────────────
-    st, ct, body = get(base, "/a11y/tree", depth=3, **({"pid": pid} if pid else {}))
+    st, ct, body = get(base, "/a11y/tree", depth=3, app=app)
     text = body.decode("utf-8", "replace")
     c.check("tree: 200 + text/plain", st == 200 and ct.startswith("text/plain"), f"{st} {ct}")
     c.check("tree: non-empty", len(text.strip()) > 0)
     c.check("tree: has a role word", any(w in text for w in ("panel", "window", "frame", "application", "root", "desktop")), text[:80])
 
     # ── /a11y/find: pretty / bounds / center ────────────────────────────────
-    st, ct, body = get(base, "/a11y/find", sel="*", o="bounds", **({"pid": pid} if pid else {}))
+    st, ct, body = get(base, "/a11y/find", sel="*", o="bounds", app=app)
     text = body.decode("utf-8", "replace")
     c.check("find?o=bounds: 200", st == 200, f"{st}")
     first = next((l for l in text.splitlines() if l.strip()), "")
@@ -109,7 +118,7 @@ def run(base):
         first,
     )
 
-    st, _, body = get(base, "/a11y/find", sel="*", o="center", **({"pid": pid} if pid else {}))
+    st, _, body = get(base, "/a11y/find", sel="*", o="center", app=app)
     text = body.decode("utf-8", "replace")
     first = next((l for l in text.splitlines() if l.strip()), "")
     # A11Y_HTTP.md: center is "x,y" (bounds is "w,h,x,y"). Every backend must
@@ -121,7 +130,7 @@ def run(base):
     )
 
     # ── /a11y/find?o=value: an element's CONTENT (e.g. a text area) ─────────
-    st, _, body = get(base, "/a11y/find", sel="*", o="value", **({"pid": pid} if pid else {}))
+    st, _, body = get(base, "/a11y/find", sel="*", o="value", app=app)
     c.check("find?o=value: 200", st == 200, f"{st}")
 
     # ── /a11y/screenshot: PNG magic + real dimensions ───────────────────────
