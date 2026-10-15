@@ -77,7 +77,14 @@ impl Capture {
             #[cfg(not(windows))]
             Capture::X11(x) => x.size(),
             #[cfg(not(windows))]
-            Capture::Wl(_) => (1920, 1080),
+            // A wlroots headless output has no static mode to query: the real
+            // size only exists once a frame has been captured. Probe one (the
+            // shm mapping is reused, so this is cheap) and fall back to a sane
+            // default if the capture is not ready yet.
+            Capture::Wl(w) => match w.grab_shm_ptr() {
+                Some((_, gw, gh)) if gw > 0 && gh > 0 => (gw, gh),
+                _ => (1920, 1080),
+            },
             #[cfg(windows)]
             Capture::Win(w) => w.size(),
         }

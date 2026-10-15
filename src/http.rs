@@ -110,18 +110,29 @@ fn respond_bytes(reader: &mut BufReader<TcpStream>, status: u16, ctype: &str, bo
 /// avoids holding a capture session (and its X shm segment) open forever.
 fn screenshot_png(region: &str) -> Result<Vec<u8>, String> {
     let cap = crate::est::Capture::open()?;
-    let (mut w, mut h) = cap.size();
-    let px = cap.grab()?; // BGRA, top-down
-    // `cap.size()` is the DISPLAY size; the grabbed buffer is authoritative.
-    // They can disagree (a scale/geometry change mid-flight), and trusting the
-    // former made the crop index past the end of the buffer -> panic.
-    if w == 0 || h == 0 || (w * h * 4) as usize != px.len() {
-        if w != 0 && px.len() % (w as usize * 4) == 0 {
-            h = (px.len() / (w as usize * 4)) as u32;
-        } else {
-            return Err(format!("capture size mismatch: {}x{} vs {} bytes", w, h, px.len()));
+    // Capture::size() probes a real frame on Wayland, so it is authoritative
+    // here; the grabbed buffer must match it exactly.
+    let (mut w, mut h);
+    let px = match cap.grab_ptr() {
+        Some((p, gw, gh)) => {
+            w = gw;
+            h = gh;
+            // SAFETY: the pointer is valid until the next grab on this handle,
+            // and we copy immediately.
+            unsafe { std::slice::from_raw_parts(p, (gw * gh * 4) as usize) }.to_vec()
         }
+        None => {
+            let (sw, sh) = cap.size();
+            w = sw;
+            h = sh;
+            cap.grab()?
+        }
+    };
+    // Last line of defence: never index past the buffer (this was the panic).
+    if w == 0 || (w as usize * 4) == 0 || px.len() % (w as usize * 4) != 0 {
+        return Err(format!("capture size mismatch: {}x{} vs {} bytes", w, h, px.len()));
     }
+    h = (px.len() / (w as usize * 4)) as u32;
     let png = crate::png::encode_bgra(w, h, &px);
     if region.is_empty() {
         return Ok(png);
