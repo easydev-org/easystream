@@ -104,10 +104,12 @@ impl Atspi {
         let mut out = String::new();
         for app in self.children(&root)? {
             let name = self.prop_str(&app, "Name");
-            let pid = app.path.rsplit('/').next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            // The application's own pid lives on its child window's process id;
-            // the registry encodes it in the object path for apps (":1.5/…/1234").
-            out.push_str(&format!("{pid}\t{name}\t\n"));
+            // The pid is NOT recoverable here on newer at-spi2-core: the root's
+            // children are applications whose object path no longer carries the
+            // pid, and org.a11y.atspi.Application.Id is 0 unless the app
+            // registered one. The bus name (":1.1") is unique and stable, so it
+            // is the identifier — `tree`/`find` accept it via ?app=.
+            out.push_str(&format!("{}\t{name}\t\n", app.bus));
         }
         Ok(out)
     }
@@ -118,16 +120,35 @@ impl Atspi {
         if pid == 0 {
             return apps.into_iter().next().ok_or_else(|| "no applications".into());
         }
-        for app in apps {
+        // A legacy pid (an app that DID register Application.Id) still matches.
+        for app in &apps {
             if app.path.rsplit('/').next().and_then(|s| s.parse::<u32>().ok()) == Some(pid) {
-                return Ok(app);
+                return Ok(app.clone());
             }
         }
         Err(format!("no app with pid {pid}"))
     }
 
-    pub fn tree(&self, pid: u32, depth: u32) -> Result<String, String> {
-        let app = self.app_root(pid)?;
+    /// app_root_by_name resolves `?app=` to an application. The value is
+    /// matched against the app's Name, or its bus name when prefixed "bus:".
+    fn app_root_by_name(&self, name: &str) -> Result<Ref2, String> {
+        let root = self.desktop()?;
+        let apps = self.children(&root)?;
+        if name.is_empty() {
+            return apps.into_iter().next().ok_or_else(|| "no applications".into());
+        }
+        let want = name.strip_prefix("bus:").unwrap_or(name);
+        for app in &apps {
+            let n = self.prop_str(app, "Name");
+            if app.bus == want || n == want || n.contains(want) {
+                return Ok(app.clone());
+            }
+        }
+        Err(format!("no app named {name}"))
+    }
+
+    pub fn tree(&self, pid: u32, app: &str, depth: u32) -> Result<String, String> {
+        let app = if app.is_empty() { self.app_root(pid)? } else { self.app_root_by_name(app)? };
         let mut out = String::new();
         self.walk(&app, 0, depth, &mut out)?;
         Ok(out)
@@ -148,8 +169,8 @@ impl Atspi {
 
     /// find returns pretty/bounds/center for the FIRST node matching a simple
     /// `role[name="…"]` / `name="…"` selector.
-    pub fn find(&self, pid: u32, sel: &str, out: u8) -> Result<String, String> {
-        let app = self.app_root(pid)?;
+    pub fn find(&self, pid: u32, app: &str, sel: &str, out: u8) -> Result<String, String> {
+        let app = if app.is_empty() { self.app_root(pid)? } else { self.app_root_by_name(app)? };
         let (want_role, want_name) = parse_selector(sel);
         if let Some(n) = self.search(&app, &want_role, &want_name)? {
             match out {
@@ -191,8 +212,8 @@ impl Atspi {
         r.unwrap_or((0, 0, 0, 0))
     }
 
-    pub fn action(&self, pid: u32, sel: &str, action: &str, value: Option<&str>) -> Result<String, String> {
-        let app = self.app_root(pid)?;
+    pub fn action(&self, pid: u32, app: &str, sel: &str, action: &str, value: Option<&str>) -> Result<String, String> {
+        let app = if app.is_empty() { self.app_root(pid)? } else { self.app_root_by_name(app)? };
         let (role, name) = parse_selector(sel);
         let node = self.search(&app, &role, &name)?.ok_or_else(|| format!("no match for {sel}"))?;
         let proxy = self.conn.with_proxy(node.bus.as_str(), node.path.as_str(), Duration::from_secs(5));

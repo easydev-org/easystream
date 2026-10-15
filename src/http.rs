@@ -184,18 +184,19 @@ fn a11y_route(reader: &mut BufReader<TcpStream>, path: &str, query: &str, a11y: 
     }
     let result: Result<String, String> = match path {
         "/a11y/apps" => be.apps(),
-        "/a11y/tree" => be.tree(pid, q(query, "depth").parse().unwrap_or(0)),
+        "/a11y/tree" => be.tree(pid, &q(query, "app"), q(query, "depth").parse().unwrap_or(0)),
         "/a11y/find" => {
             let o = match q(query, "o").as_str() {
                 "bounds" => 1,
                 "center" => 2,
+                "value" => 3,
                 _ => 0,
             };
-            be.find(pid, &q(query, "sel"), o)
+            be.find(pid, &q(query, "app"), &q(query, "sel"), o)
         }
         "/a11y/action" => {
             let v = q(query, "value");
-            be.action(pid, &q(query, "sel"), &q(query, "action"), if v.is_empty() { None } else { Some(&v) })
+            be.action(pid, &q(query, "app"), &q(query, "sel"), &q(query, "action"), if v.is_empty() { None } else { Some(&v) })
         }
         // Clipboard: `?set=TEXT` writes, otherwise reads. The daemon's est
         // connection already owns a clipboard implementation (the real Win32
