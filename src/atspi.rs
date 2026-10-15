@@ -193,9 +193,9 @@ impl Atspi {
         let r = self.role_name(node);
         let n = self.prop_str(node, "Name");
         if (role.is_empty() || r.contains(role)) && (name.is_empty() || n == name) {
-            if !(role.is_empty() && name.is_empty()) {
-                return Ok(Some(node.clone()));
-            }
+            // An EMPTY selector (`*`) means "any element": take the root, which
+            // is what a caller asking for "*" wants (its descendants follow).
+            return Ok(Some(node.clone()));
         }
         for kid in self.children(node)? {
             if let Some(hit) = self.search(&kid, role, name)? {
