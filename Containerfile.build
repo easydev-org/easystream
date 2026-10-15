@@ -3,15 +3,16 @@
 #
 # The UI is not vendored in this repo: it is fetched from the single source of
 # truth (easydev-org/easystream-webui) here, at build time, and lands in
-# rust/webui/ where `include_str!` inlines it into the binary.
+# webui/ where `include_str!` inlines it into the binary.
+#
+# Base is an official Docker Hub image; buildkitd mirrors docker.io to the
+# in-cluster registry, so it resolves without internet.
 #
 #   buildctl build --frontend dockerfile.v0 \
-#     --local context=. --local dockerfile=. \
-#     --opt filename=Containerfile.build \
-#     --opt build-arg:WEBUI_REF=main \
+#     --local context=. --local dockerfile=. --opt filename=Containerfile.build \
 #     --opt build-arg:HTTPS_PROXY=http://mihomo.develop.svc.cluster.local:7890
-ARG REGISTRY=artifact.worker.svc.cluster.local
-FROM ${REGISTRY}/toolchain/rust:latest
+ARG REGISTRY=docker.io/library
+FROM ${REGISTRY}/rust:1-bookworm
 
 ARG WEBUI_REF=main
 ARG HTTPS_PROXY
@@ -20,11 +21,26 @@ ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# The Linux backend links D-Bus (AT-SPI), libx264, libxcb(-xtest/shm/xfixes/
+# render), wayland-client, xkbcommon and libyuv; build.rs compiles the C shims.
+# Debian packages come from the in-cluster artifact mirror (the build node has
+# no route to deb.debian.org). rust:1-bookworm is Debian 12 (bookworm).
+ARG ARTIFACT=http://artifact.worker.svc.cluster.local
+RUN rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list \
+    && printf 'deb [trusted=yes] %s/artifacts/debian/debian bookworm main\n' "${ARTIFACT}" > /etc/apt/sources.list.d/artifact.list \
+    && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config \
+      libdbus-1-dev \
+      libx264-dev libyuv-dev \
+      libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-render0-dev \
+      libwayland-dev libxkbcommon-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
-COPY rust/ /src/
-# Fetch the shared UI into rust/webui/ (build-webui.sh is in the repo root).
-COPY build-webui.sh /src/build-webui.sh
-RUN bash /src/build-webui.sh && ls -la /src/rust/webui
+COPY . /src/
+
+RUN bash /src/build-webui.sh && ls -la /src/webui
 
 RUN cargo build --release --manifest-path /src/Cargo.toml
 # The single artefact the sandbox image ships.
