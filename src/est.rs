@@ -567,6 +567,17 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     // on Windows Wgc::open() creates a frame pool AND calls StartCapture, so a
     // per-connection open meant N capture sessions.
     let (w, h) = shared_size();
+    // Tell the Wayland input backend the extent absolute pointer motion is
+    // normalised against. The shim used to hard-code 1920x1080, so on any other
+    // screen the cursor landed in the wrong place.
+    #[cfg(not(windows))]
+    if let Some(m) = input.as_ref() {
+        if let Ok(i) = m.lock() {
+            if let Input::Wl(wl) = &*i {
+                wl.set_output_size(w, h);
+            }
+        }
+    }
     let conn = Arc::new(Conn {
         stream: Mutex::new(stream.try_clone().map_err(|e| e.to_string())?),
         input,

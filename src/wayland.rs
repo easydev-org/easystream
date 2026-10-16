@@ -14,6 +14,7 @@ extern "C" {
     fn na_wlin_key(h: *mut c_void, keycode: u32, down: libc::c_int);
     fn na_wlin_mods(h: *mut c_void, depressed: u32, latched: u32, locked: u32, group: u32);
     fn na_wlin_close(h: *mut c_void);
+    fn na_wlin_set_size(h: *mut c_void, w: libc::c_int, hh: libc::c_int);
 }
 
 /// WlInput is the Wayland input backend (wlr-virtual-pointer/keyboard).
@@ -39,6 +40,12 @@ impl WlInput {
     }
     pub fn move_to(&self, x: i16, y: i16) {
         unsafe { na_wlin_move(self.handle, x as i32, y as i32) }
+    }
+    /// set_output_size tells the backend the extent absolute motion is
+    /// normalised against. Without it the shim falls back to a guessed
+    /// 1920x1080 and the cursor lands in the wrong place on other screens.
+    pub fn set_output_size(&self, w: u32, h: u32) {
+        unsafe { na_wlin_set_size(self.handle, w as i32, h as i32) }
     }
     pub fn button(&self, num: u8, down: bool) {
         unsafe { na_wlin_button(self.handle, num as i32, down as i32) }

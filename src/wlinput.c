@@ -21,6 +21,12 @@ typedef struct {
     struct zwp_virtual_keyboard_manager_v1 *kbd_mgr;
     struct zwp_virtual_keyboard_v1 *kbd;
     uint32_t time;
+    // Output size used to NORMALISE absolute pointer motion. The protocol wants
+    // the extent the coordinates are expressed against; a hard-coded 1920x1080
+    // put the cursor in the wrong place on any other screen (e.g. 1024x768).
+    // Set from the capture size via na_wlin_set_size().
+    int out_w;
+    int out_h;
 } na_wlin;
 
 static void reg_global(void *data, struct wl_registry *reg, uint32_t name,
@@ -88,10 +94,25 @@ void *na_wlin_open(void) {
 void na_wlin_move(void *h, int x, int y) {
     na_wlin *w = (na_wlin *)h;
     // motion_absolute(time, x, y, x_extent, y_extent): the extent MUST be the
-    // output size, not 0, or the pointer does not move.
-    zwlr_virtual_pointer_v1_motion_absolute(w->ptr, w->time++, (uint32_t)x, (uint32_t)y, 1920, 1080);
+    // output size, not 0, or the pointer does not move. Use the REAL size the
+    // Rust side reported (see na_wlin_set_size); 1920x1080 is only a last
+    // resort when it never did.
+    int ew = w->out_w > 0 ? w->out_w : 1920;
+    int eh = w->out_h > 0 ? w->out_h : 1080;
+    zwlr_virtual_pointer_v1_motion_absolute(w->ptr, w->time++, (uint32_t)x, (uint32_t)y, (uint32_t)ew, (uint32_t)eh);
     zwlr_virtual_pointer_v1_frame(w->ptr);
     wl_display_flush(w->display);
+}
+
+// na_wlin_set_size tells the input backend the output extent absolute motion is
+// expressed against. The daemon calls it once the capture size is known, so the
+// cursor lands where the caller asked on any screen size.
+void na_wlin_set_size(void *h, int w, int hh) {
+    na_wlin *in = (na_wlin *)h;
+    if (in && w > 0 && hh > 0) {
+        in->out_w = w;
+        in->out_h = hh;
+    }
 }
 
 void na_wlin_button(void *h, int button, int down) {
