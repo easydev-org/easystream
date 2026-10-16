@@ -14,9 +14,83 @@ every OS. Point it at one or more daemons:
 Exit status is non-zero if any check fails, so it works as a CI gate.
 """
 
+import struct
 import sys
 import urllib.parse
 import urllib.request
+import zlib
+
+
+def png_stats(body):
+    """Decode a PNG and return (w, h, distinct_colors, nonblack_ratio).
+
+    A format-only check passes on a BLANK frame — which is exactly what an
+    Xwayland capture of a Wayland desktop produced (its root window is empty).
+    So the content must be inspected: a real desktop has many colours and
+    non-black pixels. Returns None if the PNG cannot be decoded.
+    """
+    if body[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    i = 8
+    w = h = colortype = None
+    idat = b""
+    while i + 8 <= len(body):
+        ln = struct.unpack_from(">I", body, i)[0]
+        typ = body[i + 4:i + 8]
+        data = body[i + 8:i + 8 + ln]
+        if typ == b"IHDR":
+            w, h, _bd, colortype = struct.unpack_from(">IIBB", data, 0)
+        elif typ == b"IDAT":
+            idat += data
+        elif typ == b"IEND":
+            break
+        i += 12 + ln
+    if not w or not idat:
+        return None
+    bpp = {0: 1, 2: 3, 4: 2, 6: 4}.get(colortype)
+    if bpp is None:
+        return None
+    raw = zlib.decompress(idat)
+    stride = w * bpp
+    out = bytearray()
+    prev = bytearray(stride)
+    pos = 0
+    for _ in range(h):
+        f = raw[pos]; pos += 1
+        line = bytearray(raw[pos:pos + stride]); pos += stride
+        if f == 1:
+            for x in range(bpp, stride):
+                line[x] = (line[x] + line[x - bpp]) & 0xff
+        elif f == 2:
+            for x in range(stride):
+                line[x] = (line[x] + prev[x]) & 0xff
+        elif f == 3:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                line[x] = (line[x] + ((a + prev[x]) >> 1)) & 0xff
+        elif f == 4:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                b = prev[x]
+                c = prev[x - bpp] if x >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[x] = (line[x] + pr) & 0xff
+        out += line
+        prev = line
+    colors = set()
+    nonblack = total = 0
+    for y in range(0, h, max(1, h // 60)):
+        base = y * stride
+        for x in range(0, w, max(1, w // 60)):
+            o = base + x * bpp
+            px = tuple(out[o:o + bpp])
+            colors.add(px)
+            if any(v > 16 for v in px[:3]):
+                nonblack += 1
+            total += 1
+    return (w, h, len(colors), nonblack / max(1, total))
 
 
 def get(base, path, **params):
@@ -137,10 +211,17 @@ def run(base):
     st, ct, body = get(base, "/a11y/screenshot")
     c.check("screenshot: 200 + image/png", st == 200 and ct.startswith("image/png"), f"{st} {ct}")
     c.check("screenshot: PNG magic", body[:8] == b"\x89PNG\r\n\x1a\n", body[:8])
-    if len(body) > 24:
-        w = int.from_bytes(body[16:20], "big")
-        h = int.from_bytes(body[20:24], "big")
+    stats = png_stats(body) if st == 200 else None
+    if stats is None:
+        c.check("screenshot: decodable PNG", False, "could not decode")
+    else:
+        w, h, colors, nonblack = stats
         c.check("screenshot: 1024x768", (w, h) == (1024, 768), f"{w}x{h}")
+        # The content check that a format-only test cannot make: a BLANK frame
+        # (an Xwayland capture of a Wayland desktop) has ~1 colour and no
+        # non-black pixels, yet is a valid 1024x768 PNG.
+        c.check("screenshot: not blank", colors >= 4, f"{colors} distinct colours")
+        c.check("screenshot: has visible content", nonblack > 0.01, f"nonblack={nonblack:.3f}")
 
     # ── /a11y/clipboard: round-trip ─────────────────────────────────────────
     token = "easystream-e2e-clip"
