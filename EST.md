@@ -35,6 +35,12 @@ On connect the server sends `Hello` immediately (no client preface):
   u16 width
   u16 height
   u8  fps
+  --- audio block (extension; a v1 client ignores the bytes past offset 7) ---
+  u8  hasAudio     1 = Audio frames follow, 0 = no audio
+  u8  audioCodec   1 = Opus
+  u32 sampleRate   e.g. 48000
+  u8  channels     1 or 2
+  u8  frameMs      Opus frame duration (20)
 ```
 
 The client then sends control frames; the server streams `Video` frames as they
@@ -50,6 +56,33 @@ are produced (it starts the capture+encode pipeline on connect).
 
 This is the hot path: the server pushes one `Video` frame per encoded AU. A
 client that only wants the stream sends nothing else.
+
+## Audio (S->C)
+
+```
+0x05 Audio:
+  bytes: one Opus packet (20 ms). Present only when Hello.hasAudio == 1.
+```
+
+## Auth (C->S, optional)
+
+**View is the open default** — a client that sends nothing is read-only and
+needs no token. Only CONTROL (input + a11y actions + clipboard writes) requires
+the token configured in `EAZYSTREAM_CONTROL_TOKEN`.
+
+A client asks for CONTROL by sending:
+
+```
+0x03 Auth (C->S):  bytes: utf8 token
+0x04 AuthOk (S->C): u8 mode  (0 = view/read-only, 1 = control)
+```
+
+`AuthOk` ALWAYS returns a mode: a missing or wrong token simply yields `0`
+(view). The HTTP pipe derives the mode from the request token (`?token=` or the
+2nd Sec-WebSocket-Protocol item) and relays it to est with the same frame.
+
+In VIEW mode the server DROPS every mutation frame: pointer (0x10-0x12),
+keyboard (0x13-0x14), a11y ActionReq (0x26) and ClipSet (0x32).
 
 ## Pointer (C->S)
 

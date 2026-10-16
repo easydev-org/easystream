@@ -12,6 +12,7 @@ fn main() {
     // wayland shim kept its per-frame leak while the source looked fixed).
     for f in [
         "src/x264shim.cpp",
+        "src/opusshim.cpp",
         "src/x11shim.c",
         "src/wlshim.c",
         "src/wlinput.c",
@@ -24,6 +25,7 @@ fn main() {
     // Compile the tiny x264 shim (avoids binding x264's huge, version-dependent
     // x264_param_t / x264_picture_t layouts from Rust).
     cc::Build::new().file("src/x264shim.cpp").compile("na_x264");
+    cc::Build::new().file("src/opusshim.cpp").compile("na_opus");
     cc::Build::new().file("src/x11shim.c").compile("na_x11");
     cc::Build::new()
         .file("src/wlshim.c")
@@ -39,6 +41,7 @@ fn main() {
         .include("proto")
         .compile("na_wlin");
     println!("cargo:rustc-link-lib=x264");
+    println!("cargo:rustc-link-lib=opus");
     println!("cargo:rustc-link-lib=xcb");
     println!("cargo:rustc-link-lib=xcb-xtest");
     println!("cargo:rustc-link-lib=xcb-shm");

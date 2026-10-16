@@ -71,11 +71,22 @@ fn handle(stream: TcpStream, est_port: u16, a11y: A11y) -> Result<(), String> {
     let path = url.split('?').next().unwrap_or("/").to_string();
     let query = url.splitn(2, '?').nth(1).unwrap_or("").to_string();
 
+    // Token: prefer the WebSocket subprotocol list ("est, <token>") — browsers
+    // can set that without putting the token in the URL/logs. Fall back to
+    // ?token= for plain HTTP (a11y) clients. Only enforced when auth is on.
+    // View is the open default; only the control token upgrades to CONTROL.
+    let token = token_from(&headers, &query);
+    let mode = crate::auth::authorize(token.as_deref());
+    // A11y mutations (action/click/type/key/...) are forbidden in View mode.
+    if mode == crate::auth::Mode::View && a11y_is_mutation(&path, &query) {
+        return respond_text(&mut reader, 403, "text/plain", "read-only");
+    }
+
     match path.as_str() {
         "/" | "/index.html" => respond_text(&mut reader, 200, "text/html; charset=utf-8", INDEX_HTML),
         "/app.js" => respond_text(&mut reader, 200, "application/javascript; charset=utf-8", APP_JS),
         "/health" => respond_text(&mut reader, 200, "text/plain", "ok"),
-        "/est/ws" => ws_pipe(reader, headers, est_port),
+        "/est/ws" => ws_pipe(reader, headers, est_port, mode, query.contains("audio=1")),
         p if p.starts_with("/a11y/") => a11y_route(&mut reader, p, &query, a11y),
         _ => respond_text(&mut reader, 404, "text/plain", "not found"),
     }
@@ -248,18 +259,32 @@ fn clipboard_get() -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn clipboard_get() -> Result<String, String> {
+    // NOTE: an EMPTY clipboard makes wl-paste exit non-zero ("Nothing is
+    // copied"); that is not an error. We accept any tool that RAN (we got a
+    // process) — its stdout is the clipboard, empty included — and only report
+    // an error when no tool exists at all (NotFound).
+    let mut ran = false;
     for (cmd, args) in [
         ("wl-paste", vec!["--no-newline"]),
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
     ] {
-        if let Ok(out) = std::process::Command::new(cmd).args(&args).output() {
-            if out.status.success() {
-                return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+        match std::process::Command::new(cmd).args(&args).output() {
+            Ok(out) => {
+                ran = true;
+                if out.status.success() {
+                    return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => ran = true,
         }
     }
-    Err("clipboard get: no wl-paste/xclip/xsel succeeded".into())
+    if ran {
+        Ok(String::new()) // a clipboard tool exists; the clipboard is just empty
+    } else {
+        Err("clipboard get: no wl-paste/xclip/xsel available".into())
+    }
 }
 
 /// clipboard_set writes the system clipboard.
@@ -381,7 +406,7 @@ fn input_drag(query: &str) -> Result<String, String> {
 
 /// ws_pipe upgrades the request and relays binary frames to/from a fresh est TCP
 /// connection — a transparent byte pipe (the daemon does not parse the frames).
-fn ws_pipe(mut reader: BufReader<TcpStream>, headers: Vec<(String, String)>, est_port: u16) -> Result<(), String> {
+fn ws_pipe(mut reader: BufReader<TcpStream>, headers: Vec<(String, String)>, est_port: u16, mode: crate::auth::Mode, want_audio: bool) -> Result<(), String> {
     let key = headers
         .iter()
         .find(|(k, _)| k == "sec-websocket-key")
@@ -396,12 +421,45 @@ fn ws_pipe(mut reader: BufReader<TcpStream>, headers: Vec<(String, String)>, est
         base64::engine::general_purpose::STANDARD.encode(h.finalize())
     };
     let mut sock = reader.get_ref().try_clone().map_err(|e| e.to_string())?;
+    // Browsers REQUIRE the server to echo a subprotocol when the client offered
+    // one, or they fail the connection. We echo "est" (never the token).
+    let proto = headers
+        .iter()
+        .find(|(k, _)| k == "sec-websocket-protocol")
+        .and_then(|(_, v)| v.split(',').map(|s| s.trim()).find(|p| !p.is_empty()))
+        .unwrap_or("est");
     let resp = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {proto}\r\n\r\n"
     );
     sock.write_all(resp.as_bytes()).map_err(|e| e.to_string())?;
 
     let tcp = TcpStream::connect(("127.0.0.1", est_port)).map_err(|e| e.to_string())?;
+    // Propagate the HTTP-layer mode to the est connection with an Auth frame,
+    // so est itself also enforces View (defence in depth: even if a mutation
+    // frame slipped past the WS filter, est would drop it).
+    {
+        let tok = match mode {
+            crate::auth::Mode::Control => std::env::var("EAZYSTREAM_CONTROL_TOKEN").unwrap_or_default(),
+            crate::auth::Mode::View => std::env::var("EAZYSTREAM_VIEW_TOKEN").unwrap_or_default(),
+        };
+        let mut w = tcp.try_clone().map_err(|e| e.to_string())?;
+        if !crate::auth::is_open() {
+            let mut hdr = [0u8; 6];
+            hdr[0] = 0x03; // T_AUTH
+            hdr[2..6].copy_from_slice(&(tok.len() as u32).to_be_bytes());
+            let _ = w.write_all(&hdr);
+            let _ = w.write_all(tok.as_bytes());
+            let _ = w.flush();
+        }
+    }
+    // Ask est for audio if the browser wants it (?audio=1).
+    if want_audio {
+        let mut w = tcp.try_clone().map_err(|e| e.to_string())?;
+        let mut hdr = [0u8; 6];
+        hdr[0] = 0x06; // T_AUDIO_REQ
+        let _ = w.write_all(&hdr);
+        let _ = w.flush();
+    }
     let tcp = Arc::new(tcp);
     let tcp_r = Arc::clone(&tcp);
     let mut ws_w = sock.try_clone().map_err(|e| e.to_string())?;
@@ -423,11 +481,17 @@ fn ws_pipe(mut reader: BufReader<TcpStream>, headers: Vec<(String, String)>, est
         let _ = tcp_r.shutdown(std::net::Shutdown::Both);
     });
 
-    // browser -> est
+    // browser -> est. In View mode, drop every mutation frame (input, a11y
+    // action, clipboard write) BEFORE it reaches the est daemon.
     let mut tcp_w = &*tcp;
     loop {
         match ws_read(&mut reader) {
             Ok(Some(frame)) => {
+                if mode == crate::auth::Mode::View && frame.len() >= 1
+                    && crate::auth::is_mutation(frame[0])
+                {
+                    continue; // silently ignored
+                }
                 if tcp_w.write_all(&frame).is_err() {
                     break;
                 }
@@ -491,5 +555,37 @@ fn ws_read(r: &mut BufReader<TcpStream>) -> Result<Option<Vec<u8>>, String> {
         0x8 => Err("close".into()),     // close
         0x9 | 0xa => Ok(None),          // ping/pong: ignore
         _ => Ok(None),                  // text/continuation: ignore (est is binary)
+    }
+}
+
+/// token_from extracts the access token: the 2nd item of the Sec-WebSocket-
+/// Protocol header ("est, <token>"), else ?token= in the query string.
+fn token_from(headers: &[(String, String)], query: &str) -> Option<String> {
+    if let Some((_, v)) = headers.iter().find(|(k, _)| k == "sec-websocket-protocol") {
+        for part in v.split(',') {
+            let p = part.trim();
+            if !p.is_empty() && p != "est" {
+                return Some(p.to_string());
+            }
+        }
+    }
+    for kv in query.split('&') {
+        if let Some(rest) = kv.strip_prefix("token=") {
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// a11y_is_mutation reports whether an /a11y/* request CHANGES the guest.
+/// `/a11y/clipboard` is a READ unless it carries `?set=` (a clipboard write).
+fn a11y_is_mutation(path: &str, query: &str) -> bool {
+    match path {
+        "/a11y/action" | "/a11y/click" | "/a11y/type" | "/a11y/key"
+        | "/a11y/scroll" | "/a11y/drag" => true,
+        "/a11y/clipboard" => query.split('&').any(|kv| kv.starts_with("set=")),
+        _ => false,
     }
 }
