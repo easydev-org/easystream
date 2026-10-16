@@ -79,12 +79,22 @@ impl Capture {
             #[cfg(not(windows))]
             // A wlroots headless output has no static mode to query: the real
             // size only exists once a frame has been captured. Probe one (the
-            // shm mapping is reused, so this is cheap) and fall back to a sane
-            // default if the capture is not ready yet.
-            Capture::Wl(w) => match w.grab_shm_ptr() {
-                Some((_, gw, gh)) if gw > 0 && gh > 0 => (gw, gh),
-                _ => (1920, 1080),
-            },
+            // shm mapping is reused, so this is cheap).
+            //
+            // Retry briefly rather than falling straight back to a guessed
+            // 1920x1080: on a 1024x768 desktop that guess made the daemon
+            // advertise the wrong resolution.
+            Capture::Wl(w) => {
+                for _ in 0..25 {
+                    if let Some((_, gw, gh)) = w.grab_shm_ptr() {
+                        if gw > 0 && gh > 0 {
+                            return (gw, gh);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                (1920, 1080)
+            }
             #[cfg(windows)]
             Capture::Win(w) => w.size(),
         }
@@ -531,8 +541,20 @@ fn shared_size() -> (u32, u32) {
     *SZ.get_or_init(|| {
         #[cfg(windows)]
         { Wgc::open().map(|c| c.size()).unwrap_or((1920, 1080)) }
+        // Linux: ASK the capture backend. It used to be a hard-coded
+        // (1920, 1080), which is wrong for every screen that is not 1080p —
+        // the daemon advertised the wrong resolution to the worker and the
+        // stream was cropped/scaled. Capture::size() probes a real frame on
+        // Wayland and reports the X screen on X11.
         #[cfg(not(windows))]
-        { (1920u32, 1080u32) }
+        {
+            Capture::open()
+                .and_then(|c| {
+                    let (w, h) = c.size();
+                    if w > 0 && h > 0 { Ok((w, h)) } else { Err("no size".into()) }
+                })
+                .unwrap_or((1920, 1080))
+        }
     })
 }
 
