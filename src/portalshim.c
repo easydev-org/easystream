@@ -128,8 +128,14 @@ static DBusMessage *call_sync(na_portal *p, const char *iface, const char *metho
 static int wait_response(na_portal *p, const char *request_path,
                          char **out_session_handle, uint32_t *out_node,
                          int *out_w, int *out_h, char **out_token) {
+    int waited_ms = 0;
     for (;;) {
-        dbus_connection_read_write(p->conn, 1000);
+        if (waited_ms > 40000) {
+            fprintf(stderr, "portal: no Response for %s\n", request_path);
+            return -1;
+        }
+        dbus_connection_read_write(p->conn, 200);
+        waited_ms += 200;
         DBusMessage *m;
         while ((m = dbus_connection_pop_message(p->conn))) {
             if (dbus_message_is_signal(m, IFACE_REQ, "Response")) {
@@ -209,7 +215,6 @@ static int wait_response(na_portal *p, const char *request_path,
 static int portal_call(na_portal *p, const char *method, DBusMessage *msg,
                        const char *req_path, char **sh, uint32_t *node,
                        int *w, int *h, char **tok) {
-    (void)0;
     DBusError err;
     dbus_error_init(&err);
     DBusMessage *reply = call_sync(p, IFACE_SC, method, msg, &err);
@@ -218,8 +223,24 @@ static int portal_call(na_portal *p, const char *method, DBusMessage *msg,
         dbus_error_free(&err);
         return -1;
     }
+    if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
+        DBusError e2; dbus_error_init(&e2);
+        dbus_set_error_from_message(&e2, reply);
+        fprintf(stderr, "portal %s error: %s\n", method, e2.message ? e2.message : "?");
+        dbus_error_free(&e2);
+        dbus_message_unref(reply);
+        return -1;
+    }
+    // The portal RETURNS the request object path; do not guess it. (Guessing it
+    // wrong means the Response signal never matches and we block forever.)
+    const char *rpath = req_path;
+    char *returned = NULL;
+    if (dbus_message_get_args(reply, &err, DBUS_TYPE_OBJECT_PATH, &returned, DBUS_TYPE_INVALID)
+        && returned) {
+        rpath = returned;
+    }
     dbus_message_unref(reply);
-    int code = wait_response(p, req_path, sh, node, w, h, tok);
+    int code = wait_response(p, rpath, sh, node, w, h, tok);
     return code;
 }
 
