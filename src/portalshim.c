@@ -443,16 +443,21 @@ int na_portal_start(void *h) {
 
     uint8_t buf[1024];
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+    // Offer the formats the portal actually produces. GNOME's ScreenCast
+    // exposes BGRx (XRGB8888/BGRx8888), and a single-format offer is refused
+    // with "no more input formats" when it does not match.
     struct spa_video_info_raw vi = {0};
-    vi.format = SPA_VIDEO_FORMAT_BGRA;
     vi.size.width = p->width;
     vi.size.height = p->height;
     vi.framerate = (struct spa_fraction){ 30, 1 };
-    const struct spa_pod *params[1];
+    const struct spa_pod *params[2];
+    vi.format = SPA_VIDEO_FORMAT_BGRx;
     params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &vi);
+    vi.format = SPA_VIDEO_FORMAT_BGRA;
+    params[1] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &vi);
     pw_stream_connect(p->stream, PW_DIRECTION_INPUT, p->node_id,
                       PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS,
-                      params, 1);
+                      params, 2);
     pw_thread_loop_unlock(p->loop);
     pw_thread_loop_start(p->loop);
     return 0;
