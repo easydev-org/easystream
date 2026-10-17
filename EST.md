@@ -71,6 +71,19 @@ Audio is opt-in per connection:
 0x07 AudioOff (C->S): empty   turn Audio frames OFF (video is unaffected)
 ```
 
+The codec is Opus at 48 kHz, 2 channels, 20 ms frames. How each platform
+captures the *system* audio and encodes it:
+
+| Platform | Capture | Encoder | Notes |
+|----------|---------|---------|-------|
+| Linux | PulseAudio monitor source | libopus | |
+| Windows | WASAPI loopback | libopus (mingw, static) | no endpoint ⇒ `hasAudio = 0` |
+| Android | `AudioPlaybackCapture` | platform `MediaCodec` | needs MediaProjection + `RECORD_AUDIO` |
+| macOS | BlackHole loopback in a clocked aggregate device, read via AUHAL | AudioToolbox `kAudioFormatOpus` | needs the BlackHole HAL plug-in; ScreenCaptureKit's `capturesAudio` does not work in a VM |
+
+Capture failure is never fatal: the daemon advertises `hasAudio = 0` in Hello
+and simply sends no `0x05` frames.
+
 ## Auth (C->S, optional)
 
 **View is the open default** — a client that sends nothing is read-only and
