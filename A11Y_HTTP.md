@@ -9,6 +9,7 @@ GET  /                 the easystream web UI (index.html)
 GET  /app.js           the web UI client
 GET  /est/ws           WebSocket <-> est byte pipe (transparent; see EST.md)
 GET  /health
+GET  /capabilities     which path each capability resolved to (JSON)
 
 # a11y (the worker uses these over HTTP; never over est)
 GET  /a11y/apps
@@ -17,6 +18,28 @@ GET  /a11y/find        ?sel=SELECTOR [&app= | &pid=] [&o=pretty|bounds|center]
 POST /a11y/action      ?action=ACTION&sel=SELECTOR [&value=V] [&app= | &pid=]
 GET  /a11y/screenshot  [?region=X,Y,W,H]        -> image/png
 GET  /a11y/clipboard   [?set=TEXT]
+
+# /capabilities
+#
+# Decided ONCE at startup (src/probe.rs) by asking the compositor which Wayland
+# globals it exports and the portal which interfaces it exports — rather than
+# trying one path, waiting for it to fail, and falling back. Useful because the
+# paths differ wildly in cost and availability:
+#
+#   capture   zwlr_screencopy (wlroots, instant) | portal ScreenCast | X11
+#   input     zwlr_virtual_pointer/keyboard      | portal RemoteDesktop | X11
+#   a11y      AT-SPI over the session bus (no portal interface exists for this)
+#   clipboard wl-copy | xclip/xsel | none
+#
+# e.g. GNOME (mutter exports no screencopy) and sway (wlroots):
+#   {"session":"Wayland","capture":"Portal","input":"PortalRemoteDesktop",
+#    "a11y":"Atspi","clipboard":"None",
+#    "notes":["wayland globals=55 screencopy=false vptr=false vkbd=false",
+#             "portal ScreenCast"]}
+#   {"session":"Wayland","capture":"ZwlrScreencopy","input":"WlrVirtual",
+#    "a11y":"None","clipboard":"Wl",
+#    "notes":["wayland globals=47 screencopy=true vptr=true vkbd=true",
+#             "org.a11y.Bus not owned"]}
 
 # input (also HTTP: the worker's a11y surface never uses est)
 GET  /a11y/click       ?x=N&y=N [&button=left|right|middle] [&count=N]
