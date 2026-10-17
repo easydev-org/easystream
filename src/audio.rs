@@ -86,7 +86,10 @@ fn probe_done() -> bool {
 
 static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// chosen is the pre-detected backend, cached. It verifies each candidate by
+/// backend_name reports the pre-detected backend ("pipewire"/"pulse"),
+/// or None if audio is unavailable. Used by /capabilities.
+pub fn backend_name() -> Option<&'static str> { chosen() }
+
 /// actually reading a frame, so a tool that is installed but cannot capture
 /// (e.g. PipeWire with a suspended null sink) is skipped.
 fn chosen() -> Option<&'static str> {

@@ -60,6 +60,20 @@ pub enum ClipboardPath {
     None,
 }
 
+/// AudioPath is which capture backend actually produced PCM. Audio is probed
+/// separately (and asynchronously) by audio.rs, because proving a backend works
+/// means OPENING it and reading a frame — too slow for the startup probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPath {
+    /// pw-record: the modern PipeWire graph.
+    PipeWire,
+    /// parec: PulseAudio, whose null sink runs even with no sound card.
+    PulseAudio,
+    /// Still probing (audio::ensure_probed() has not finished).
+    Probing,
+    None,
+}
+
 /// Capabilities is the result of probing the running desktop once.
 #[derive(Debug, Clone)]
 pub struct Capabilities {
@@ -68,6 +82,8 @@ pub struct Capabilities {
     pub input: InputPath,
     pub a11y: A11yPath,
     pub clipboard: ClipboardPath,
+    /// Filled in lazily: audio's answer arrives after its own probe.
+    pub audio: fn() -> AudioPath,
     /// Human-readable detail for logs / the /capabilities endpoint.
     pub notes: Vec<String>,
 }
@@ -82,8 +98,14 @@ impl Capabilities {
             .join(",");
         format!(
             "{{\"session\":\"{:?}\",\"capture\":\"{:?}\",\"input\":\"{:?}\",\
-             \"a11y\":\"{:?}\",\"clipboard\":\"{:?}\",\"notes\":[{}]}}",
-            self.session, self.capture, self.input, self.a11y, self.clipboard, notes
+             \"a11y\":\"{:?}\",\"clipboard\":\"{:?}\",\"audio\":\"{:?}\",\"notes\":[{}]}}",
+            self.session,
+            self.capture,
+            self.input,
+            self.a11y,
+            self.clipboard,
+            (self.audio)(),
+            notes
         )
     }
 }
@@ -115,7 +137,27 @@ fn detect() -> Capabilities {
         input: InputPath::Windows,
         a11y: A11yPath::None,
         clipboard: ClipboardPath::None,
+        audio: || AudioPath::None,
         notes: vec!["windows".into()],
+    }
+}
+
+/// audio_path reports which audio backend produced PCM. It is a function (not a
+/// value) because audio.rs proves a backend by opening it and reading a frame,
+/// which happens on its own schedule; asking before it finishes says "Probing".
+#[cfg(not(windows))]
+fn audio_path() -> AudioPath {
+    if !crate::audio::probe_done_pub() {
+        return AudioPath::Probing;
+    }
+    let (ok, _rate, _ch, _frame) = crate::audio::params();
+    if !ok {
+        return AudioPath::None;
+    }
+    match crate::audio::backend_name() {
+        Some("pipewire") => AudioPath::PipeWire,
+        Some("pulse") => AudioPath::PulseAudio,
+        _ => AudioPath::None,
     }
 }
 
@@ -198,7 +240,7 @@ fn detect() -> Capabilities {
         ClipboardPath::None
     };
 
-    Capabilities { session, capture, input, a11y, clipboard, notes }
+    Capabilities { session, capture, input, a11y, clipboard, audio: audio_path, notes }
 }
 
 #[cfg(not(windows))]
