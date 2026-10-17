@@ -14,6 +14,8 @@ use std::time::Duration;
 #[cfg(not(windows))]
 use crate::x11::{char_keycode, key_by_name, X11};
 #[cfg(not(windows))]
+use crate::portal::Portal;
+#[cfg(not(windows))]
 use crate::wayland::{Wayland, WlInput};
 #[cfg(not(windows))]
 use crate::x264::X264;
@@ -27,6 +29,8 @@ pub enum Capture {
     X11(X11),
     #[cfg(not(windows))]
     Wl(Wayland),
+    #[cfg(not(windows))]
+    Portal(Portal),
     #[cfg(windows)]
     Win(Wgc),
 }
@@ -38,6 +42,20 @@ impl Capture {
         #[cfg(not(windows))]
         {
             if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
+                // EASYSTREAM_PORTAL: "0" = never use the portal, "1" = require
+                // it, unset/anything else = TRY the portal first and fall back.
+                //
+                // The portal is the only capture path on compositors that do not
+                // implement the wlroots screencopy protocol (kwin, mutter/GNOME);
+                // on wlroots the native path is cheaper, so prefer it there.
+                let mode = std::env::var("EASYSTREAM_PORTAL").unwrap_or_default();
+                if mode != "0" {
+                    match Portal::open() {
+                        Ok(p) => return Ok(Capture::Portal(p)),
+                        Err(e) if mode == "1" => return Err(e),
+                        Err(_) => {}
+                    }
+                }
                 return Ok(Capture::Wl(Wayland::open()?));
             }
             Ok(Capture::X11(X11::open()?))
@@ -50,6 +68,8 @@ impl Capture {
         match self {
             Capture::X11(x) => x.grab(),
             Capture::Wl(w) => w.grab(),
+            #[cfg(not(windows))]
+            Capture::Portal(p) => p.grab(),
         }
     }
     /// grab_ptr returns a pointer into the capture buffer (zero-copy), valid
@@ -68,6 +88,8 @@ impl Capture {
             Capture::X11(x) => x.grab_shm_ptr(),
             #[cfg(not(windows))]
             Capture::Wl(w) => w.grab_shm_ptr(),
+            #[cfg(not(windows))]
+            Capture::Portal(_) => None,
             #[cfg(windows)]
             Capture::Win(_) => None,
         }
@@ -76,6 +98,9 @@ impl Capture {
         match self {
             #[cfg(not(windows))]
             Capture::X11(x) => x.size(),
+            #[cfg(not(windows))]
+            // The portal negotiated the monitor size during Start; no probing.
+            Capture::Portal(p) => p.size(),
             #[cfg(not(windows))]
             // A wlroots headless output has no static mode to query: the real
             // size only exists once a frame has been captured. Probe one (the

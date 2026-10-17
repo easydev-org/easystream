@@ -15,6 +15,7 @@ fn main() {
         "src/opusshim.cpp",
         "src/x11shim.c",
         "src/wlshim.c",
+        "src/portalshim.c",
         "src/wlinput.c",
         "proto/wlr-screencopy-protocol.c",
         "proto/wlr-virtual-pointer-unstable-v1-protocol.c",
@@ -40,6 +41,29 @@ fn main() {
         .file("proto/wlr-virtual-keyboard-unstable-v1-protocol.c")
         .include("proto")
         .compile("na_wlin");
+    // The portal ScreenCast + PipeWire capture backend. libpipewire and
+    // libdbus are OPTIONAL: if their headers are missing we skip it and
+    // easystream still builds (wlroots/X11 paths unaffected).
+    let have_pw = std::process::Command::new("pkg-config")
+        .args(["--exists", "libpipewire-0.3", "dbus-1"]).status()
+        .map(|s| s.success()).unwrap_or(false);
+    if have_pw {
+        let mut pb = cc::Build::new();
+        pb.file("src/portalshim.c");
+        // dbus and pipewire keep their headers in versioned subdirs, so
+        // ask pkg-config for the include paths instead of guessing.
+        for flag in ["libpipewire-0.3", "dbus-1"] {
+            if let Ok(out) = std::process::Command::new("pkg-config").args(["--cflags-only-I", flag]).output() {
+                for inc in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                    if let Some(dir) = inc.strip_prefix("-I") { pb.include(dir); }
+                }
+            }
+        }
+        pb.compile("na_portal");
+        println!("cargo:rustc-cfg=have_portal");
+        println!("cargo:rustc-link-lib=pipewire-0.3");
+        println!("cargo:rustc-link-lib=dbus-1");
+    }
     println!("cargo:rustc-link-lib=x264");
     println!("cargo:rustc-link-lib=opus");
     println!("cargo:rustc-link-lib=xcb");

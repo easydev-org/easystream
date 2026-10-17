@@ -19,6 +19,7 @@ mod png;
 #[cfg(not(windows))]
 mod wayland;
 #[cfg(not(windows))]
+mod portal;
 mod x11;
 #[cfg(not(windows))]
 mod x264;
