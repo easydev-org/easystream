@@ -45,6 +45,7 @@ typedef struct {
     struct pw_context *context;
     struct pw_core *core;
     int got_frame;
+    int stream_error;
     uint8_t *last;            // BGRA copy of the newest frame
     size_t last_len;
     int stride;
@@ -273,9 +274,35 @@ static void on_process(void *data) {
     pw_stream_queue_buffer(p->stream, b);
 }
 
+static void on_state_changed(void *data, enum pw_stream_state old,
+                             enum pw_stream_state state, const char *error) {
+    na_portal *p = data;
+    (void)old;
+    fprintf(stderr, "portal: stream state=%s error=%s\n",
+            pw_stream_state_as_string(state), error ? error : "(none)");
+    if (state == PW_STREAM_STATE_ERROR) p->stream_error = 1;
+    if (state == PW_STREAM_STATE_PAUSED && p->width > 0) {
+        // Negotiated: now we can ask for frames.
+        pw_stream_set_active(p->stream, true);
+    }
+}
+
+static void on_param_changed(void *data, uint32_t id, const struct spa_pod *param) {
+    na_portal *p = data;
+    if (id != SPA_PARAM_Format || !param) return;
+    struct spa_video_info_raw vi;
+    if (spa_format_video_raw_parse(param, &vi) < 0) return;
+    p->width = vi.size.width;
+    p->height = vi.size.height;
+    fprintf(stderr, "portal: negotiated %dx%d format=%d\n",
+            p->width, p->height, vi.format);
+}
+
 static const struct pw_stream_events stream_events = {
     PW_VERSION_STREAM_EVENTS,
     .process = on_process,
+    .state_changed = on_state_changed,
+    .param_changed = on_param_changed,
 };
 
 // ── public API (mirrors wlshim.c) ───────────────────────────────────────────
