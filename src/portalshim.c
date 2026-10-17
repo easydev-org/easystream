@@ -269,6 +269,12 @@ void *na_portal_open(void) {
         free(p);
         return NULL;
     }
+    // The portal replies with a Response SIGNAL on the request object, and
+    // without a match rule the bus filters those out and we block forever.
+    dbus_bus_add_match(p->conn,
+        "type='signal',interface='org.freedesktop.portal.Request',member='Response'",
+        &err);
+    dbus_connection_flush(p->conn);
     p->restore_token = read_file(restore_token_path());
 
     char tok[64], stok[64];
