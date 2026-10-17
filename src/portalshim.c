@@ -253,7 +253,7 @@ void *na_portal_open(void) {
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
     DBusMessage *m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "CreateSession");
-    DBusMessageIter it, dict, entry;
+    DBusMessageIter it, dict, entry, var;
     dbus_message_iter_init_append(m, &it);
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
     dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
@@ -290,24 +290,24 @@ void *na_portal_open(void) {
     dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
     const char *k4 = "types"; dbus_uint32_t v4 = 1; // MONITOR
     dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k4);
-    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", NULL);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_UINT32, &v4);
-    dbus_message_iter_close_container(&entry, NULL);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", &var);
+    dbus_message_iter_append_basic(&var, DBUS_TYPE_UINT32, &v4);
+    dbus_message_iter_close_container(&entry, &var);
     dbus_message_iter_close_container(&dict, &entry);
     dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
     const char *k5 = "persist_mode"; dbus_uint32_t v5 = 2;
     dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k5);
-    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", NULL);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_UINT32, &v5);
-    dbus_message_iter_close_container(&entry, NULL);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", &var);
+    dbus_message_iter_append_basic(&var, DBUS_TYPE_UINT32, &v5);
+    dbus_message_iter_close_container(&entry, &var);
     dbus_message_iter_close_container(&dict, &entry);
     if (p->restore_token) {
         dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
         const char *k6 = "restore_token"; const char *v6 = p->restore_token;
         dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k6);
-        dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "s", NULL);
-        dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &v6);
-        dbus_message_iter_close_container(&entry, NULL);
+        dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "s", &var);
+        dbus_message_iter_append_basic(&var, DBUS_TYPE_STRING, &v6);
+        dbus_message_iter_close_container(&entry, &var);
         dbus_message_iter_close_container(&dict, &entry);
     }
     dbus_message_iter_close_container(&it, &dict);
