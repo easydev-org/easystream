@@ -209,28 +209,42 @@ fn which(bin: &str) -> bool {
         .any(|d| std::path::Path::new(d).join(bin).is_file())
 }
 
-// ── D-Bus probes (thin: shell out to busctl, which every desktop image has) ──
+// ── D-Bus probes ────────────────────────────────────────────────────────────
 //
-// We deliberately do NOT link libdbus for the probe: busctl already talks to
-// the bus, and this runs once at startup.
+// We shell out to busctl (every desktop image has it) rather than linking
+// libdbus, because this runs once.
+//
+// EVERY call is wrapped in `timeout`, and this is load-bearing: on an X11
+// desktop the session bus address points at a socket that is not there, and
+// busctl then sits in a connect/D-Bus timeout. capabilities() is a OnceLock, so
+// a hung probe hangs the WHOLE daemon at startup — which is exactly what
+// happened: the X11 images started easystream and it never listened.
+//
+// `timeout` is coreutils and is present in the base image; if it is somehow
+// missing the command fails immediately, which is the safe direction.
+#[cfg(not(windows))]
+fn busctl(args: &[&str]) -> String {
+    std::process::Command::new("timeout")
+        .arg("3")
+        .arg("busctl")
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 #[cfg(not(windows))]
 fn dbus_name_has_owner(name: &str) -> bool {
-    std::process::Command::new("busctl")
-        .args(["--user", "list", "--no-legend", "--no-pager"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-        .unwrap_or(false)
+    busctl(&["--user", "list", "--no-legend", "--no-pager"]).contains(name)
 }
 
 #[cfg(not(windows))]
 fn portal_has(iface: &str) -> bool {
-    std::process::Command::new("busctl")
-        .args([
-            "--user", "introspect",
-            "org.freedesktop.portal.Desktop",
-            "/org/freedesktop/portal/desktop",
-        ])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(iface))
-        .unwrap_or(false)
+    busctl(&[
+        "--user",
+        "introspect",
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+    ])
+    .contains(iface)
 }
