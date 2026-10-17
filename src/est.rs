@@ -683,7 +683,15 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     hello[4..6].copy_from_slice(&(h as u16).to_be_bytes());
     hello[6] = 30;
     // audio block @7: u8 present, u8 codec(1=Opus), u32 rate, u8 channels, u8 frame_ms
-    let (has_audio, a_rate, a_ch, a_ms) = crate::audio::params();
+    // Audio availability: wait briefly for the one-time probe so the very first
+    // Hello is accurate (it is sent once per connection, worth the wait).
+    let mut has_audio = false;
+    for _ in 0..25 {
+        let (h, r, c, m) = crate::audio::params();
+        if h || crate::audio::probe_done_pub() { has_audio = h; let _ = (r, c, m); break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (has_audio, a_rate, a_ch, a_ms) = (has_audio, crate::audio::RATE, crate::audio::CHANNELS as u8, crate::audio::FRAME_MS);
     hello[7] = if has_audio { 1 } else { 0 };
     hello[8] = 1; // Opus
     hello[9..13].copy_from_slice(&a_rate.to_be_bytes());

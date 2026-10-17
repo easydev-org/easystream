@@ -36,6 +36,9 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("easystream panic: {info}");
     }));
+    // Kick off the audio backend probe in the background so Hello can report
+    // audio availability without paying the (up to ~1.5s) probe inline.
+    audio::ensure_probed();
     let port: u16 = env::var("EAZYSTREAM_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
