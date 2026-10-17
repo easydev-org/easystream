@@ -86,6 +86,15 @@ fn handle(stream: TcpStream, est_port: u16, a11y: A11y) -> Result<(), String> {
         "/" | "/index.html" => respond_text(&mut reader, 200, "text/html; charset=utf-8", INDEX_HTML),
         "/app.js" => respond_text(&mut reader, 200, "application/javascript; charset=utf-8", APP_JS),
         "/health" => respond_text(&mut reader, 200, "text/plain", "ok"),
+        // Which path each capability resolved to, decided once at startup by
+        // src/probe.rs. Makes "why is capture slow / which backend is in use"
+        // answerable without reading logs.
+        "/capabilities" => respond_text(
+            &mut reader,
+            200,
+            "application/json",
+            &crate::probe::capabilities().to_json(),
+        ),
         "/est/ws" => ws_pipe(reader, headers, est_port, mode, query.contains("audio=1")),
         p if p.starts_with("/a11y/") => a11y_route(&mut reader, p, &query, a11y),
         _ => respond_text(&mut reader, 404, "text/plain", "not found"),
@@ -249,10 +258,9 @@ fn with_input(f: impl FnOnce(&crate::est::Input)) -> Result<String, String> {
 /// clipboard_get reads the system clipboard.
 ///
 /// Windows uses the real Win32 clipboard (shared with the est 0x30-0x32
-/// frames). Linux uses wl-clipboard (the Wayland NATIVE clipboard); easystream
-/// creates a virtual keyboard at startup, which gives the seat a keyboard
-/// capability — without it wl-clipboard refuses to run. Best-effort: a missing
-/// tool is a clear error, not a panic.
+/// frames). Linux shells out: xclip/xsel on X11, wl-paste on Wayland (the
+/// wlroots sandbox has no X clipboard tool). Best-effort: a missing tool is a
+/// clear error, not a panic.
 #[cfg(windows)]
 pub fn clipboard_get() -> Result<String, String> {
     Ok(crate::win::clipboard::get())
@@ -264,17 +272,29 @@ pub fn clipboard_get() -> Result<String, String> {
     // copied"); that is not an error. We accept any tool that RAN (we got a
     // process) — its stdout is the clipboard, empty included — and only report
     // an error when no tool exists at all (NotFound).
-    // Wayland NATIVE only. wl-clipboard needs a keyboard-capable seat, which
-    // easystream guarantees by opening its virtual keyboard at startup.
-    match std::process::Command::new("wl-paste")
-        .args(["--no-newline"])
-        .output()
-    {
-        // An EMPTY clipboard makes wl-paste exit non-zero ("Nothing is
-        // copied"); that is not an error, just an empty string.
-        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
-        Ok(_) => Ok(String::new()),
-        Err(e) => Err(format!("clipboard get: wl-paste: {e}")),
+    let mut ran = false;
+    for (cmd, args) in [
+        // xclip first: it talks to the X server, which works even when the
+        // compositor's seat has no keyboard (wl-clipboard refuses then).
+        ("xclip", vec!["-selection", "clipboard", "-o"]),
+        ("xsel", vec!["--clipboard", "--output"]),
+        ("wl-paste", vec!["--no-newline"]),
+    ] {
+        match std::process::Command::new(cmd).args(&args).output() {
+            Ok(out) => {
+                ran = true;
+                if out.status.success() {
+                    return Ok(String::from_utf8_lossy(&out.stdout).to_string());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => ran = true,
+        }
+    }
+    if ran {
+        Ok(String::new()) // a clipboard tool exists; the clipboard is just empty
+    } else {
+        Err("clipboard get: no wl-paste/xclip/xsel available".into())
     }
 }
 
@@ -290,22 +310,32 @@ pub fn clipboard_set(text: &str) -> Result<String, String> {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
-    // Wayland NATIVE only (see clipboard_get). wl-copy STAYS RESIDENT to serve
-    // the selection — it does not exit, so we must NOT wait() on it or we hang
-    // forever. We detach (setsid) and let the child keep the clipboard alive.
-    let mut c = std::process::Command::new("wl-copy");
-    c.args(["--type", "text/plain;charset=utf-8"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    unsafe { c.pre_exec(|| { libc::setsid(); Ok(()) }); }
-    let mut child = c.spawn().map_err(|e| format!("clipboard set: wl-copy: {e}"))?;
-    if let Some(mut si) = child.stdin.take() {
-        let _ = si.write_all(text.as_bytes()); // closing stdin = EOF
+    for (cmd, args) in [
+        // xclip first (X11 works without a keyboard-capable seat). Both xclip
+        // and wl-copy STAY RESIDENT to serve the selection — they do not exit,
+        // so we must NOT wait() on them or we hang forever. We detach (setsid)
+        // and let the child keep the clipboard alive.
+        ("xclip", vec!["-selection", "clipboard"]),
+        ("xsel", vec!["--clipboard", "--input"]),
+        ("wl-copy", vec!["--type", "text/plain;charset=utf-8"]),
+    ] {
+        let mut c = std::process::Command::new(cmd);
+        c.args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        unsafe { c.pre_exec(|| { libc::setsid(); Ok(()) }); }
+        if let Ok(mut child) = c.spawn() {
+            if let Some(mut si) = child.stdin.take() {
+                let _ = si.write_all(text.as_bytes());
+                // closing stdin signals EOF to the tool
+            }
+            std::thread::spawn(move || { let _ = child.wait(); });
+            return Ok("ok".into());
+        }
     }
-    std::thread::spawn(move || { let _ = child.wait(); });
-    Ok("ok".into())
+    Err("clipboard set: no wl-copy/xclip/xsel available".into())
 }
 
 fn input_click(query: &str) -> Result<String, String> {

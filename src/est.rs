@@ -41,24 +41,30 @@ impl Capture {
         { return Ok(Capture::Win(Wgc::open()?)); }
         #[cfg(not(windows))]
         {
-            if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
-                // EASYSTREAM_PORTAL: "0" = never use the portal, "1" = require
-                // it, unset/anything else = TRY the portal first and fall back.
-                //
-                // The portal is the only capture path on compositors that do not
-                // implement the wlroots screencopy protocol (kwin, mutter/GNOME);
-                // on wlroots the native path is cheaper, so prefer it there.
-                let mode = std::env::var("EASYSTREAM_PORTAL").unwrap_or_default();
-                if mode != "0" {
-                    match Portal::open() {
-                        Ok(p) => return Ok(Capture::Portal(p)),
-                        Err(e) if mode == "1" => return Err(e),
-                        Err(_) => {}
+            // Use the startup probe's answer instead of "try one, wait for it to
+            // fail, fall back": the probe asks the compositor which protocols it
+            // exports, which is instant, whereas a failed portal attempt cost a
+            // D-Bus round trip on every capture (a screenshot opened one each).
+            use crate::probe::{capabilities, CapturePath};
+            let caps = capabilities();
+            match caps.capture {
+                CapturePath::ZwlrScreencopy => Ok(Capture::Wl(Wayland::open()?)),
+                CapturePath::Portal => Ok(Capture::Portal(Portal::open()?)),
+                CapturePath::X11 => Ok(Capture::X11(X11::open()?)),
+                CapturePath::None => {
+                    // The probe ran before the desktop was up (or on a bare
+                    // session): fall back to the old dynamic choice so a late
+                    // compositor still works.
+                    if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
+                        match Portal::open() {
+                            Ok(p) => return Ok(Capture::Portal(p)),
+                            Err(_) => return Ok(Capture::Wl(Wayland::open()?)),
+                        }
                     }
+                    Ok(Capture::X11(X11::open()?))
                 }
-                return Ok(Capture::Wl(Wayland::open()?));
+                CapturePath::Windows => Ok(Capture::X11(X11::open()?)),
             }
-            Ok(Capture::X11(X11::open()?))
         }
     }
     /// grab returns the newest frame as top-down BGRA pixels (the X11/Wayland
@@ -625,14 +631,24 @@ pub fn shared_input() -> &'static Option<Mutex<Input>> {
         { WinInput::open().ok().map(|i| Mutex::new(Input::Win(i))) }
         #[cfg(not(windows))]
         {
-            let wayland = std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
-            if wayland {
-                match WlInput::open() {
+            // Same probe-driven choice as capture: ask the compositor whether it
+            // exports the wlroots virtual input protocols.
+            use crate::probe::{capabilities, InputPath};
+            match capabilities().input {
+                InputPath::WlrVirtual => match WlInput::open() {
                     Ok(i) => Some(Mutex::new(Input::Wl(i))),
                     Err(e) => { eprintln!("wayland input: {e}"); None }
+                },
+                InputPath::X11 => X11::open().ok().map(|i| Mutex::new(Input::X11(i))),
+                InputPath::PortalRemoteDesktop => {
+                    // Not implemented yet; fall back to whatever the session has.
+                    if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
+                        WlInput::open().ok().map(|i| Mutex::new(Input::Wl(i)))
+                    } else {
+                        X11::open().ok().map(|i| Mutex::new(Input::X11(i)))
+                    }
                 }
-            } else {
-                X11::open().ok().map(|i| Mutex::new(Input::X11(i)))
+                _ => None,
             }
         }
     })

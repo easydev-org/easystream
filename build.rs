@@ -16,6 +16,7 @@ fn main() {
         "src/x11shim.c",
         "src/wlshim.c",
         "src/portalshim.c",
+        "src/wlprobe.c",
         "src/wlinput.c",
         "proto/wlr-screencopy-protocol.c",
         "proto/wlr-virtual-pointer-unstable-v1-protocol.c",
@@ -60,6 +61,8 @@ fn main() {
             }
         }
         pb.compile("na_portal");
+    // Wayland capability probe (registry globals) — linked with wayland-client.
+    cc::Build::new().file("src/wlprobe.c").compile("na_wlprobe");
         println!("cargo:rustc-cfg=have_portal");
         println!("cargo:rustc-link-lib=pipewire-0.3");
         println!("cargo:rustc-link-lib=dbus-1");

@@ -20,6 +20,7 @@ mod png;
 mod wayland;
 #[cfg(not(windows))]
 mod portal;
+mod probe;
 mod x11;
 #[cfg(not(windows))]
 mod x264;
@@ -40,11 +41,6 @@ fn main() {
     // Kick off the audio backend probe in the background so Hello can report
     // audio availability without paying the (up to ~1.5s) probe inline.
     audio::ensure_probed();
-    // Open the input backend at startup: on Wayland this creates the virtual
-    // keyboard, which gives the seat a KEYBOARD capability. wl-clipboard
-    // REFUSES to work without it, so the clipboard would fail until the first
-    // input event otherwise.
-    let _ = est::shared_input();
     let port: u16 = env::var("EAZYSTREAM_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
