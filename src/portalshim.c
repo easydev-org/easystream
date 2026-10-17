@@ -449,7 +449,9 @@ int na_portal_start(void *h) {
     struct spa_video_info_raw vi = {0};
     vi.size.width = p->width;
     vi.size.height = p->height;
-    vi.framerate = (struct spa_fraction){ 30, 1 };
+    // The portal node advertises framerate {0,1} ("any"); asking for a fixed
+    // 30/1 did not match and the stream failed with "no more input formats".
+    vi.framerate = (struct spa_fraction){ 0, 1 };
     const struct spa_pod *params[2];
     vi.format = SPA_VIDEO_FORMAT_BGRx;
     params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &vi);
