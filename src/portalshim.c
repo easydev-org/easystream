@@ -128,7 +128,6 @@ static DBusMessage *call_sync(na_portal *p, const char *iface, const char *metho
 static int wait_response(na_portal *p, const char *request_path,
                          char **out_session_handle, uint32_t *out_node,
                          int *out_w, int *out_h, char **out_token) {
-    dbus_connection_add_filter(p->conn, NULL, NULL, NULL); // no-op keep
     for (;;) {
         dbus_connection_read_write(p->conn, 1000);
         DBusMessage *m;
