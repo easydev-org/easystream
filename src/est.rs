@@ -217,6 +217,7 @@ const T_CLIP_DATA: u8 = 0x31;
 const T_CLIP_SET: u8 = 0x32;
 const T_AUDIO: u8 = 0x05;
 const T_AUDIO_REQ: u8 = 0x06;
+const T_AUDIO_OFF: u8 = 0x07;
 const T_AUTH: u8 = 0x03;
 const T_AUTH_OK: u8 = 0x04;
 const T_PING: u8 = 0x50;
@@ -780,7 +781,12 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
     }
     if typ == T_AUDIO_REQ {
         conn.audio_on.store(true, std::sync::atomic::Ordering::SeqCst);
-        eprintln!("est: audio requested");
+        eprintln!("est: audio on");
+        return Ok(());
+    }
+    if typ == T_AUDIO_OFF {
+        conn.audio_on.store(false, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("est: audio off");
         return Ok(());
     }
     match typ {

@@ -64,6 +64,13 @@ client that only wants the stream sends nothing else.
   bytes: one Opus packet (20 ms). Present only when Hello.hasAudio == 1.
 ```
 
+Audio is opt-in per connection:
+
+```
+0x06 AudioReq (C->S): empty   turn Audio frames ON for this connection
+0x07 AudioOff (C->S): empty   turn Audio frames OFF (video is unaffected)
+```
+
 ## Auth (C->S, optional)
 
 **View is the open default** — a client that sends nothing is read-only and
