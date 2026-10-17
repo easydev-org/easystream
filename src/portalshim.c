@@ -299,8 +299,14 @@ void *na_portal_open(void) {
     p->restore_token = read_file(restore_token_path());
 
     char tok[64], stok[64];
-    snprintf(tok, sizeof(tok), "eas%d", (int)getpid());
-    snprintf(stok, sizeof(stok), "ess%d", (int)getpid());
+    // A per-process counter, NOT the pid: the portal rejects a second session
+    // whose handle_token matches an existing one ("An object is already exported
+    // for the interface org.freedesktop.impl.portal.Session"), and the pid is
+    // the same for every request in one process.
+    static unsigned seq = 0;
+    unsigned id = ++seq;
+    snprintf(tok, sizeof(tok), "eas%u", id);
+    snprintf(stok, sizeof(stok), "ess%u", id);
     char sender[128];
     const char *uniq = dbus_bus_get_unique_name(p->conn);
     // The request path is /org/freedesktop/portal/desktop/request/<sender>/<token>
@@ -327,7 +333,7 @@ void *na_portal_open(void) {
     p->session_handle = sh;
 
     // 2) SelectSources(types=MONITOR, persist_mode=2, restore_token)
-    snprintf(tok, sizeof(tok), "ess%d", (int)getpid());
+    snprintf(tok, sizeof(tok), "ess%u", id);
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
     m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "SelectSources");
@@ -345,7 +351,7 @@ void *na_portal_open(void) {
     }
 
     // 3) Start
-    snprintf(tok, sizeof(tok), "est%d", (int)getpid());
+    snprintf(tok, sizeof(tok), "est%u", id);
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
     m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "Start");
