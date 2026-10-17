@@ -182,16 +182,13 @@ fn detect() -> Capabilities {
         Session::None => {}
     }
 
-    // AT-SPI has no portal interface; it is a session-bus service. We only
-    // record whether the bus name is resolvable.
-    let a11y = if dbus_name_has_owner("org.a11y.Bus") {
-        A11yPath::Atspi
-    } else {
-        A11yPath::None
-    };
-    if matches!(a11y, A11yPath::None) {
-        notes.push("org.a11y.Bus not owned".into());
-    }
+    // AT-SPI has no portal interface: it is a session-bus service, and it is
+    // LAZY — org.a11y.Bus only appears once a client asks for it. So probing it
+    // at startup reports "None" even on desktops where it works perfectly
+    // (observed on sway: /capabilities said None while /a11y/apps worked).
+    // Report it as "probe at first use" rather than lying.
+    let a11y = A11yPath::Atspi;
+    notes.push("a11y: AT-SPI is lazy; checked on first use".into());
 
     let clipboard = if session == Session::Wayland && which("wl-copy") {
         ClipboardPath::Wl
