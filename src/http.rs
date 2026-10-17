@@ -265,11 +265,12 @@ pub fn clipboard_get() -> Result<String, String> {
     // an error when no tool exists at all (NotFound).
     let mut ran = false;
     for (cmd, args) in [
-        // xclip first: it talks to the X server, which works even when the
-        // compositor's seat has no keyboard (wl-clipboard refuses then).
+        // Wayland NATIVE first: wl-clipboard needs the seat to have a keyboard,
+        // which it does once easystream has created its virtual keyboard
+        // (http_server opens the shared input at startup for exactly this).
+        ("wl-paste", vec!["--no-newline"]),
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
-        ("wl-paste", vec!["--no-newline"]),
     ] {
         match std::process::Command::new(cmd).args(&args).output() {
             Ok(out) => {
@@ -302,13 +303,13 @@ pub fn clipboard_set(text: &str) -> Result<String, String> {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     for (cmd, args) in [
-        // xclip first (X11 works without a keyboard-capable seat). Both xclip
-        // and wl-copy STAY RESIDENT to serve the selection — they do not exit,
-        // so we must NOT wait() on them or we hang forever. We detach (setsid)
-        // and let the child keep the clipboard alive.
+        // Wayland native first (see clipboard_get). wl-copy STAYS RESIDENT to
+        // serve the selection — it does not exit, so we must NOT wait() on it
+        // or we hang forever. We detach (setsid) and let the child keep the
+        // clipboard alive.
+        ("wl-copy", vec!["--type", "text/plain;charset=utf-8"]),
         ("xclip", vec!["-selection", "clipboard"]),
         ("xsel", vec!["--clipboard", "--input"]),
-        ("wl-copy", vec!["--type", "text/plain;charset=utf-8"]),
     ] {
         let mut c = std::process::Command::new(cmd);
         c.args(&args)
