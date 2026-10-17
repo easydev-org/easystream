@@ -81,6 +81,39 @@ static void write_file(const char *p, const char *v) {
 
 // ── D-Bus helpers ───────────────────────────────────────────────────────────
 
+
+// Helpers that build a{sv} entries correctly. Every value inside {sv} MUST be
+// wrapped in a variant; getting this wrong makes libdbus abort with
+// "Array or variant type requires that type variant be written".
+static void dict_add_str(DBusMessageIter *dict, const char *key, const char *val) {
+    DBusMessageIter e, v;
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &e);
+    dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &key);
+    dbus_message_iter_open_container(&e, DBUS_TYPE_VARIANT, "s", &v);
+    dbus_message_iter_append_basic(&v, DBUS_TYPE_STRING, &val);
+    dbus_message_iter_close_container(&e, &v);
+    dbus_message_iter_close_container(dict, &e);
+}
+static void dict_add_u32(DBusMessageIter *dict, const char *key, uint32_t val) {
+    DBusMessageIter e, v;
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &e);
+    dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &key);
+    dbus_message_iter_open_container(&e, DBUS_TYPE_VARIANT, "u", &v);
+    dbus_message_iter_append_basic(&v, DBUS_TYPE_UINT32, &val);
+    dbus_message_iter_close_container(&e, &v);
+    dbus_message_iter_close_container(dict, &e);
+}
+static void dict_add_bool(DBusMessageIter *dict, const char *key, int val) {
+    DBusMessageIter e, v;
+    dbus_int32_t b = val ? 1 : 0;
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &e);
+    dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &key);
+    dbus_message_iter_open_container(&e, DBUS_TYPE_VARIANT, "b", &v);
+    dbus_message_iter_append_basic(&v, DBUS_TYPE_BOOLEAN, &b);
+    dbus_message_iter_close_container(&e, &v);
+    dbus_message_iter_close_container(dict, &e);
+}
+
 static DBusMessage *call_sync(na_portal *p, const char *iface, const char *method,
                               DBusMessage *msg, DBusError *err) {
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(
@@ -177,6 +210,7 @@ static int wait_response(na_portal *p, const char *request_path,
 static int portal_call(na_portal *p, const char *method, DBusMessage *msg,
                        const char *req_path, char **sh, uint32_t *node,
                        int *w, int *h, char **tok) {
+    (void)0;
     DBusError err;
     dbus_error_init(&err);
     DBusMessage *reply = call_sync(p, IFACE_SC, method, msg, &err);
@@ -253,23 +287,16 @@ void *na_portal_open(void) {
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
     DBusMessage *m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "CreateSession");
-    DBusMessageIter it, dict, entry, var;
+    DBusMessageIter it, dict;
     dbus_message_iter_init_append(m, &it);
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k1 = "handle_token"; const char *v1 = tok;
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k1);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &v1);
-    dbus_message_iter_close_container(&dict, &entry);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k2 = "session_handle_token"; const char *v2 = stok;
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k2);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &v2);
-    dbus_message_iter_close_container(&dict, &entry);
+    dict_add_str(&dict, "handle_token", tok);
+    dict_add_str(&dict, "session_handle_token", stok);
     dbus_message_iter_close_container(&it, &dict);
     char *sh = NULL;
     if (portal_call(p, "CreateSession", m, reqpath, &sh, NULL, NULL, NULL, NULL) != 0 || !sh) {
-        free(p); return NULL;
+        free(p);
+        return NULL;
     }
     p->session_handle = sh;
 
@@ -282,34 +309,10 @@ void *na_portal_open(void) {
     const char *shp = p->session_handle;
     dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k3 = "handle_token"; const char *v3 = tok;
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k3);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &v3);
-    dbus_message_iter_close_container(&dict, &entry);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k4 = "types"; dbus_uint32_t v4 = 1; // MONITOR
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k4);
-    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", &var);
-    dbus_message_iter_append_basic(&var, DBUS_TYPE_UINT32, &v4);
-    dbus_message_iter_close_container(&entry, &var);
-    dbus_message_iter_close_container(&dict, &entry);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k5 = "persist_mode"; dbus_uint32_t v5 = 2;
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k5);
-    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "u", &var);
-    dbus_message_iter_append_basic(&var, DBUS_TYPE_UINT32, &v5);
-    dbus_message_iter_close_container(&entry, &var);
-    dbus_message_iter_close_container(&dict, &entry);
-    if (p->restore_token) {
-        dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-        const char *k6 = "restore_token"; const char *v6 = p->restore_token;
-        dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k6);
-        dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "s", &var);
-        dbus_message_iter_append_basic(&var, DBUS_TYPE_STRING, &v6);
-        dbus_message_iter_close_container(&entry, &var);
-        dbus_message_iter_close_container(&dict, &entry);
-    }
+    dict_add_str(&dict, "handle_token", tok);
+    dict_add_u32(&dict, "types", 1);          // 1 = MONITOR
+    dict_add_u32(&dict, "persist_mode", 2);   // 2 = persist until revoked
+    if (p->restore_token) dict_add_str(&dict, "restore_token", p->restore_token);
     dbus_message_iter_close_container(&it, &dict);
     if (portal_call(p, "SelectSources", m, reqpath, NULL, NULL, NULL, NULL, NULL) != 0) {
         return NULL;
@@ -325,11 +328,7 @@ void *na_portal_open(void) {
     const char *parent = "";
     dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &parent);
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
-    dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
-    const char *k7 = "handle_token"; const char *v7 = tok;
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k7);
-    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &v7);
-    dbus_message_iter_close_container(&dict, &entry);
+    dict_add_str(&dict, "handle_token", tok);
     dbus_message_iter_close_container(&it, &dict);
     char *newtok = NULL;
     if (portal_call(p, "Start", m, reqpath, NULL, &p->node_id, &p->width, &p->height, &newtok) != 0) {
