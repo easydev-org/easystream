@@ -253,21 +253,23 @@ fn with_input(f: impl FnOnce(&crate::est::Input)) -> Result<String, String> {
 /// wlroots sandbox has no X clipboard tool). Best-effort: a missing tool is a
 /// clear error, not a panic.
 #[cfg(windows)]
-fn clipboard_get() -> Result<String, String> {
+pub fn clipboard_get() -> Result<String, String> {
     Ok(crate::win::clipboard::get())
 }
 
 #[cfg(not(windows))]
-fn clipboard_get() -> Result<String, String> {
+pub fn clipboard_get() -> Result<String, String> {
     // NOTE: an EMPTY clipboard makes wl-paste exit non-zero ("Nothing is
     // copied"); that is not an error. We accept any tool that RAN (we got a
     // process) — its stdout is the clipboard, empty included — and only report
     // an error when no tool exists at all (NotFound).
     let mut ran = false;
     for (cmd, args) in [
-        ("wl-paste", vec!["--no-newline"]),
+        // xclip first: it talks to the X server, which works even when the
+        // compositor's seat has no keyboard (wl-clipboard refuses then).
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
+        ("wl-paste", vec!["--no-newline"]),
     ] {
         match std::process::Command::new(cmd).args(&args).output() {
             Ok(out) => {
@@ -289,35 +291,42 @@ fn clipboard_get() -> Result<String, String> {
 
 /// clipboard_set writes the system clipboard.
 #[cfg(windows)]
-fn clipboard_set(text: &str) -> Result<String, String> {
+pub fn clipboard_set(text: &str) -> Result<String, String> {
     crate::win::clipboard::set(text);
     Ok("ok".into())
 }
 
 #[cfg(not(windows))]
-fn clipboard_set(text: &str) -> Result<String, String> {
+pub fn clipboard_set(text: &str) -> Result<String, String> {
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
     for (cmd, args) in [
-        ("wl-copy", vec![]),
+        // xclip first (X11 works without a keyboard-capable seat). Both xclip
+        // and wl-copy STAY RESIDENT to serve the selection — they do not exit,
+        // so we must NOT wait() on them or we hang forever. We detach (setsid)
+        // and let the child keep the clipboard alive.
         ("xclip", vec!["-selection", "clipboard"]),
         ("xsel", vec!["--clipboard", "--input"]),
+        ("wl-copy", vec!["--type", "text/plain;charset=utf-8"]),
     ] {
-        if let Ok(mut child) = std::process::Command::new(cmd)
-            .args(&args)
+        let mut c = std::process::Command::new(cmd);
+        c.args(&args)
             .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        unsafe { c.pre_exec(|| { libc::setsid(); Ok(()) }); }
+        if let Ok(mut child) = c.spawn() {
             if let Some(mut si) = child.stdin.take() {
                 let _ = si.write_all(text.as_bytes());
+                // closing stdin signals EOF to the tool
             }
-            if let Ok(st) = child.wait() {
-                if st.success() {
-                    return Ok("ok".into());
-                }
-            }
+            std::thread::spawn(move || { let _ = child.wait(); });
+            return Ok("ok".into());
         }
     }
-    Err("clipboard set: no wl-copy/xclip/xsel succeeded".into())
+    Err("clipboard set: no wl-copy/xclip/xsel available".into())
 }
 
 fn input_click(query: &str) -> Result<String, String> {

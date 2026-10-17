@@ -903,10 +903,11 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
             });
         }
         T_CLIP_GET => {
-            #[cfg(windows)]
-            let text = win_clip::get();
-            #[cfg(not(windows))]
-            let text = conn.clipboard.lock().unwrap().clone();
+            // Use the REAL system clipboard (the same backend the HTTP /a11y/
+            // clipboard route uses): wl-paste / xclip / xsel on Linux, Win32 on
+            // Windows. The old per-connection String was a private buffer that
+            // nothing else could see, which is why the buttons looked dead.
+            let text = crate::http::clipboard_get().unwrap_or_default();
             let mut p = Vec::with_capacity(8 + text.len());
             p.extend_from_slice(&0u32.to_be_bytes());
             p.extend_from_slice(&(text.len() as u32).to_be_bytes());
@@ -914,14 +915,12 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
             conn.write_frame(T_CLIP_DATA, &p).map_err(|e| e.to_string())?;
         }
         T_CLIP_SET => {
-            if b.len() >= 4 {
-                let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
-                if b.len() >= 4 + n {
-                    let text = String::from_utf8_lossy(&b[4..4 + n]).to_string();
-                    #[cfg(windows)]
-                    win_clip::set(&text);
-                    #[cfg(not(windows))]
-                    { *conn.clipboard.lock().unwrap() = text; }
+            // EST.md: u32 id, u32 len, text[len]
+            if b.len() >= 8 {
+                let n = u32::from_be_bytes([b[4], b[5], b[6], b[7]]) as usize;
+                if b.len() >= 8 + n {
+                    let text = String::from_utf8_lossy(&b[8..8 + n]).to_string();
+                    let _ = crate::http::clipboard_set(&text);
                 }
             }
         }
