@@ -61,12 +61,17 @@ fn main() {
             }
         }
         pb.compile("na_portal");
-    // Wayland capability probe (registry globals) — linked with wayland-client.
-    cc::Build::new().file("src/wlprobe.c").compile("na_wlprobe");
         println!("cargo:rustc-cfg=have_portal");
         println!("cargo:rustc-link-lib=pipewire-0.3");
         println!("cargo:rustc-link-lib=dbus-1");
     }
+    // Wayland capability probe (registry globals) — linked with wayland-client.
+    //
+    // MUST stay OUTSIDE the `if have_pw` block above: probe.rs calls
+    // na_probe_wayland unconditionally, so nesting this inside the portal block
+    // made the link fail with "undefined symbol: na_probe_wayland" whenever
+    // libpipewire was absent. The probe only needs wayland-client (a hard dep).
+    cc::Build::new().file("src/wlprobe.c").compile("na_wlprobe");
     println!("cargo:rustc-link-lib=x264");
     println!("cargo:rustc-link-lib=opus");
     println!("cargo:rustc-link-lib=xcb");
