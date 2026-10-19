@@ -30,7 +30,6 @@ pub enum CapturePath {
     Portal,
     /// XGetImage / XSHM.
     X11,
-    Windows,
     None,
 }
 
@@ -42,7 +41,6 @@ pub enum InputPath {
     PortalRemoteDesktop,
     /// XTest.
     X11,
-    Windows,
     None,
 }
 
@@ -111,12 +109,10 @@ impl Capabilities {
 }
 
 // ── C shims ─────────────────────────────────────────────────────────────────
-#[cfg(not(windows))]
 extern "C" {
     fn na_probe_wayland(out: *mut libc::c_int) -> libc::c_int;
 }
 
-#[cfg(not(windows))]
 fn wayland_globals() -> Option<[i32; 8]> {
     let mut out = [0i32; 8];
     let rc = unsafe { na_probe_wayland(out.as_mut_ptr()) };
@@ -129,23 +125,10 @@ pub fn capabilities() -> &'static Capabilities {
     C.get_or_init(detect)
 }
 
-#[cfg(windows)]
-fn detect() -> Capabilities {
-    Capabilities {
-        session: Session::None,
-        capture: CapturePath::Windows,
-        input: InputPath::Windows,
-        a11y: A11yPath::None,
-        clipboard: ClipboardPath::None,
-        audio: || AudioPath::None,
-        notes: vec!["windows".into()],
-    }
-}
 
 /// audio_path reports which audio backend produced PCM. It is a function (not a
 /// value) because audio.rs proves a backend by opening it and reading a frame,
 /// which happens on its own schedule; asking before it finishes says "Probing".
-#[cfg(not(windows))]
 fn audio_path() -> AudioPath {
     if !crate::audio::probe_done_pub() {
         return AudioPath::Probing;
@@ -161,7 +144,6 @@ fn audio_path() -> AudioPath {
     }
 }
 
-#[cfg(not(windows))]
 fn detect() -> Capabilities {
     let mut notes = Vec::new();
 
@@ -243,7 +225,6 @@ fn detect() -> Capabilities {
     Capabilities { session, capture, input, a11y, clipboard, audio: audio_path, notes }
 }
 
-#[cfg(not(windows))]
 fn which(bin: &str) -> bool {
     std::env::var("PATH")
         .unwrap_or_default()
@@ -264,7 +245,6 @@ fn which(bin: &str) -> bool {
 //
 // `timeout` is coreutils and is present in the base image; if it is somehow
 // missing the command fails immediately, which is the safe direction.
-#[cfg(not(windows))]
 fn busctl(args: &[&str]) -> String {
     std::process::Command::new("timeout")
         .arg("3")
@@ -275,12 +255,10 @@ fn busctl(args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(not(windows))]
 fn dbus_name_has_owner(name: &str) -> bool {
     busctl(&["--user", "list", "--no-legend", "--no-pager"]).contains(name)
 }
 
-#[cfg(not(windows))]
 fn portal_has(iface: &str) -> bool {
     busctl(&[
         "--user",

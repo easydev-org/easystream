@@ -220,7 +220,7 @@ fn a11y_route(reader: &mut BufReader<TcpStream>, path: &str, query: &str, a11y: 
         }
         // Clipboard: `?set=TEXT` writes, otherwise reads. The daemon's est
         // connection already owns a clipboard implementation (the real Win32
-        // one on Windows, an in-process one elsewhere), so share it.
+        // in-process), so share it.
         "/a11y/clipboard" => {
             let set = q(query, "set");
             if set.is_empty() { clipboard_get() } else { clipboard_set(&set) }
@@ -257,16 +257,10 @@ fn with_input(f: impl FnOnce(&crate::est::Input)) -> Result<String, String> {
 
 /// clipboard_get reads the system clipboard.
 ///
-/// Windows uses the real Win32 clipboard (shared with the est 0x30-0x32
-/// frames). Linux shells out: xclip/xsel on X11, wl-paste on Wayland (the
+/// The system clipboard is read by shelling out: xclip/xsel on X11, wl-paste on Wayland (the
 /// wlroots sandbox has no X clipboard tool). Best-effort: a missing tool is a
 /// clear error, not a panic.
-#[cfg(windows)]
-pub fn clipboard_get() -> Result<String, String> {
-    Ok(crate::win::clipboard::get())
-}
 
-#[cfg(not(windows))]
 pub fn clipboard_get() -> Result<String, String> {
     // NOTE: an EMPTY clipboard makes wl-paste exit non-zero ("Nothing is
     // copied"); that is not an error. We accept any tool that RAN (we got a
@@ -299,13 +293,7 @@ pub fn clipboard_get() -> Result<String, String> {
 }
 
 /// clipboard_set writes the system clipboard.
-#[cfg(windows)]
-pub fn clipboard_set(text: &str) -> Result<String, String> {
-    crate::win::clipboard::set(text);
-    Ok("ok".into())
-}
 
-#[cfg(not(windows))]
 pub fn clipboard_set(text: &str) -> Result<String, String> {
     use std::io::Write;
     #[cfg(unix)]
@@ -383,15 +371,9 @@ fn input_key(query: &str) -> Result<String, String> {
     })
 }
 
-// The Linux and Windows key maps have the same shape but different keycodes.
-#[cfg(not(windows))]
+// The Linux key map (X11 keycodes).
 fn char_keycode(ch: char) -> Option<(u8, bool)> { crate::x11::char_keycode(ch) }
-#[cfg(windows)]
-fn char_keycode(ch: char) -> Option<(u16, bool)> { crate::win::char_keycode(ch) }
-#[cfg(not(windows))]
 fn key_by_name(name: &str) -> Option<u8> { crate::x11::key_by_name(name) }
-#[cfg(windows)]
-fn key_by_name(name: &str) -> Option<u16> { crate::win::key_by_name(name) }
 
 fn input_scroll(query: &str) -> Result<String, String> {
     let (x, y) = (num(query, "x") as i16, num(query, "y") as i16);

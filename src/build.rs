@@ -1,11 +1,4 @@
 fn main() {
-    // The Windows backend uses the `windows` crate (no C shims); the Linux
-    // backends need the x264/xcb/wayland shims. Compile those only on non-Windows
-    // so the same crate cross-compiles to x86_64-pc-windows-gnu from Linux.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "windows" {
-        return;
-    }
     // Re-run this script when any C/C++ shim or protocol source changes.
     // Without these, cargo only re-runs the build script when build.rs itself
     // changes, so edits to the .c shims were silently NOT recompiled (a stale
