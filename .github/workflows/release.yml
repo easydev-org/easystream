@@ -70,13 +70,31 @@ jobs:
       - name: cross toolchain (arm64)
         if: matrix.arch == 'arm64'
         run: |
+          set -euo pipefail
           sudo dpkg --add-architecture arm64
-          # Ubuntu maps arm64 to ports.ubuntu.com; the default archive only
-          # carries amd64 and would 404.
-          sudo sed -i 's|^deb |deb [arch=amd64] |' /etc/apt/sources.list || true
-          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe
+
+          # arm64 packages live on ports.ubuntu.com; archive.ubuntu.com and
+          # security.ubuntu.com only carry amd64/i386 and answer 404 for arm64.
+          #
+          # The codename must be the RUNNER's codename, which is noble (24.04)
+          # on GitHub-hosted runners. Hard-coding jammy produced
+          #   404 Not Found  .../dists/noble/main/binary-arm64/Packages
+          # because the default sources still pointed at the runner's own
+          # codename while the added arm64 entry was pinned to jammy.
+          CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          echo "runner codename: $CODENAME"
+
+          # Keep amd64 sources on the default archive, restrict them to amd64 so
+          # apt never asks them for arm64 indexes.
+          sudo sed -i 's|^deb |deb [arch=amd64] |; s|^deb-src |deb-src [arch=amd64] |' \
+            /etc/apt/sources.list || true
+          sudo sed -i 's|^deb |deb [arch=amd64] |; s|^deb-src |deb-src [arch=amd64] |' \
+            /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+
+          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<EOF
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main universe
           EOF
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
