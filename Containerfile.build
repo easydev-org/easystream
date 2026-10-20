@@ -5,34 +5,38 @@
 # truth (easydev-org/easystream-webui) here, at build time, and lands in
 # webui/ where `include_str!` inlines it into the binary.
 #
-# Base is an official Docker Hub image; buildkitd mirrors docker.io to the
-# in-cluster registry, so it resolves without internet.
+# Plain, self-contained build: no proxy settings, no private registries, no
+# mirror addresses. It behaves identically on a laptop, on CI, and in a cluster.
+# If an environment needs an egress proxy, that belongs to the builder
+# (buildkitd / the daemon), NOT to this file.
 #
-#   buildctl build --frontend dockerfile.v0 \
-#     --local context=. --local dockerfile=. --opt filename=Containerfile.build \
-#     --opt build-arg:HTTPS_PROXY=http://mihomo.develop.svc.cluster.local:7890
+#   docker build -f Containerfile.build .
 ARG REGISTRY=docker.io/library
 FROM ${REGISTRY}/rust:1-bookworm
 
 ARG WEBUI_REF=main
-ARG HTTPS_PROXY
-ARG HTTP_PROXY
-ENV HTTPS_PROXY=${HTTPS_PROXY} HTTP_PROXY=${HTTP_PROXY} \
-    CARGO_HOME=/usr/local/cargo \
+ENV CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # The Linux backend links D-Bus (AT-SPI), libx264, libxcb(-xtest/shm/xfixes/
 # render), wayland-client, xkbcommon and libyuv; build.rs compiles the C shims.
-# Debian packages come from the in-cluster artifact mirror (the build node has
-# no route to deb.debian.org). rust:1-bookworm is Debian 12 (bookworm).
-ARG ARTIFACT=http://artifact.worker.svc.cluster.local
+#
+# Aliyun's Debian mirror over HTTPS. Nothing in this file refers to a private
+# registry, so it builds the same way on a laptop, in CI, and in the cluster.
+#
+# HTTPS matters: an egress proxy that fronts the build refuses plain http:// and
+# returns its own "404 Cannot find any route matching", which apt reports only as
+# "does not have a Release file".
 RUN rm -f /etc/apt/sources.list.d/* /etc/apt/sources.list \
-    && printf 'deb [trusted=yes] %s/artifacts/debian/debian bookworm main\n' "${ARTIFACT}" > /etc/apt/sources.list.d/artifact.list \
+    && printf 'deb https://mirrors.aliyun.com/debian bookworm main\n' > /etc/apt/sources.list \
+    && printf 'deb https://mirrors.aliyun.com/debian bookworm-updates main\n' >> /etc/apt/sources.list \
+    && printf 'deb https://mirrors.aliyun.com/debian-security bookworm-security main\n' >> /etc/apt/sources.list \
     && echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
     && apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
       libdbus-1-dev \
-      libx264-dev libyuv-dev \
+      libx264-dev libyuv-dev libopus-dev \
+      libpipewire-0.3-dev \
       libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-render0-dev \
       libwayland-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
