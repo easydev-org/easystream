@@ -84,30 +84,39 @@ jobs:
           CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
           echo "runner codename: $CODENAME"
 
-          # Restrict the EXISTING sources to amd64, so apt never asks
-          # archive.ubuntu.com / security.ubuntu.com for arm64 indexes — they do
-          # not carry arm64 and answer 404:
-          #   E: Failed to fetch .../dists/noble/main/binary-arm64/Packages  404
+          # REPLACE the runner's sources outright rather than trying to edit
+          # them.
           #
-          # Ubuntu 24.04 (the runner image) describes repositories in deb822
-          # .sources files, NOT as `deb ...` lines, so rewriting `^deb ` matches
-          # nothing. Add the Architectures field to each stanza instead.
+          # Two attempts at editing failed silently:
+          #   * rewriting `^deb ` lines matches nothing — Ubuntu 24.04 (the
+          #     runner image) uses deb822 .sources stanzas;
+          #   * injecting an Architectures: field into those stanzas did not
+          #     take either, and apt kept asking security.ubuntu.com for arm64
+          #     indexes that it does not publish:
+          #       E: Failed to fetch .../noble-security/.../binary-arm64/Packages  404
           #
-          # Drop legacy one-line lists first: on a runner that still has them,
-          # they would reintroduce the arm64 queries.
-          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list || true
-          for f in /etc/apt/sources.list.d/*.sources; do
-            [ -e "$f" ] || continue
-            sudo awk '
-              BEGIN { done = 0 }
-              /^Types:/ && !done { print; print "Architectures: amd64"; done = 1; next }
-              /^Architectures:/ { next }   # drop any existing one
-              { print }
-            ' "$f" | sudo tee "$f.new" >/dev/null
-            sudo mv "$f.new" "$f"
-          done
-          echo "--- sources after amd64 pinning ---"
-          grep -rE '^(URIs|Suites|Architectures):' /etc/apt/sources.list.d/*.sources 2>/dev/null | head -12
+          # Writing the two files we actually want leaves nothing to guess: the
+          # amd64 archives are pinned to amd64, and arm64 comes only from
+          # ports.ubuntu.com, the single archive that carries it.
+          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+                     /etc/apt/sources.list.d/*.sources
+          sudo tee /etc/apt/sources.list.d/amd64.sources >/dev/null <<EOF
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports
+          Components: main restricted universe multiverse
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://security.ubuntu.com/ubuntu/
+          Suites: ${CODENAME}-security
+          Components: main restricted universe multiverse
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          echo "--- sources in effect ---"
+          cat /etc/apt/sources.list.d/*.sources
 
           sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<EOF
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main universe
