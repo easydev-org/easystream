@@ -1,20 +1,25 @@
 name: release
 
-# Build easystream (the Linux est daemon) for amd64 and arm64 and attach both to
-# the GitHub Release for the pushed tag.
+# Build easystream (the Linux est daemon) for amd64 and arm64, run its tests, and
+# attach both binaries to the GitHub Release for the pushed tag.
 #
-# These release assets used to be produced by hand inside a build container, and
-# that path was fragile in ways only the image build revealed: apt needed a
-# reachable mirror, cargo needed a crates mirror, and the linker needed libopus
-# and libpipewire present or the portal shims silently dropped out. CI pins all
-# of that in one reviewable place.
+# NATIVE RUNNERS, NOT CROSS-COMPILATION.
 #
-# The system libraries this daemon links at BUILD time (x264, opus, yuv, xcb,
-# wayland-client, xkbcommon, dbus, pipewire) are compiled into the binary; the
-# runtime only needs the shared objects the distro already has for those
-# (x264/opus/pipewire are dlopen-style or linked, see the README). Building on
-# ubuntu-latest gives a modern glibc, which is why the artifact is named for the
-# distro family rather than pretending to be portable everywhere.
+# The arm64 binary used to be cross-compiled on an x86 runner. Building worked
+# but testing could not: a cross-compiled arm64 test binary cannot be EXECUTED
+# there at all —
+#
+#   error: test failed, to rerun pass `--bin easystream`
+#     Exec format error (os error 8)
+#
+# so the test step had to be downgraded to `cargo check`, which only proves the
+# code compiles. On a native arm64 runner the tests actually run, and the whole
+# cross-toolchain apparatus disappears: no dpkg --add-architecture, no
+# ports.ubuntu.com, no pkg-config cross variables, no FORTIFY surprises.
+#
+# The build-time libraries (x264, opus, yuv, xcb, wayland-client, xkbcommon,
+# dbus, pipewire) are linked into the binary; libpipewire-0.3-dev is required or
+# the portal backend is skipped silently and na_portal_* fails to link.
 
 on:
   push:
@@ -33,47 +38,23 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    # Cross-compilation settings for the arm64 job, at JOB level so that both
-    # `cargo test` and `cargo build` see them.
-    #
-    # They were previously set only on the build step, and `cargo test` failed
-    # first:
-    #   error: failed to run custom build command for `libdbus-sys v0.2.7`
-    #   pkg_config failed: pkg-config has not been configured to support
-    #   cross-compilation
-    # pkg-config refuses to answer for a foreign target unless told to, and the
-    # C shims need the arm64 toolchain rather than the host's gcc.
-    env:
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-      PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu: "1"
-      PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-      PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu: "/"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: amd64, target: x86_64-unknown-linux-gnu }
-          - { arch: arm64, target: aarch64-unknown-linux-gnu }
+          # ubuntu-24.04-arm is a native arm64 runner, so the tests run for real.
+          - { runner: ubuntu-latest,    arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.arch }}
 
-      # Everything build.rs probes for. Without libpipewire-0.3-dev the portal
-      # backend is skipped (`have_pw` false) and the crate still compiles — but
-      # the resulting binary cannot capture through Portal, and the link of
-      # na_portal_* fails outright. Keeping them explicit makes the dependency
-      # visible instead of implicit in a Dockerfile.
       - name: system libraries
         run: |
           sudo apt-get update
@@ -85,107 +66,28 @@ jobs:
             libxcb-xfixes0-dev libxcb-render0-dev \
             libwayland-dev libxkbcommon-dev
 
-      - name: cross toolchain (arm64)
-        if: matrix.arch == 'arm64'
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-
-          # arm64 packages live on ports.ubuntu.com; archive.ubuntu.com and
-          # security.ubuntu.com only carry amd64/i386 and answer 404 for arm64.
-          #
-          # The codename must be the RUNNER's codename, which is noble (24.04)
-          # on GitHub-hosted runners. Hard-coding jammy produced
-          #   404 Not Found  .../dists/noble/main/binary-arm64/Packages
-          # because the default sources still pointed at the runner's own
-          # codename while the added arm64 entry was pinned to jammy.
-          CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-          echo "runner codename: $CODENAME"
-
-          # REPLACE the runner's sources outright rather than trying to edit
-          # them.
-          #
-          # Two attempts at editing failed silently:
-          #   * rewriting `^deb ` lines matches nothing — Ubuntu 24.04 (the
-          #     runner image) uses deb822 .sources stanzas;
-          #   * injecting an Architectures: field into those stanzas did not
-          #     take either, and apt kept asking security.ubuntu.com for arm64
-          #     indexes that it does not publish:
-          #       E: Failed to fetch .../noble-security/.../binary-arm64/Packages  404
-          #
-          # Writing the two files we actually want leaves nothing to guess: the
-          # amd64 archives are pinned to amd64, and arm64 comes only from
-          # ports.ubuntu.com, the single archive that carries it.
-          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
-                     /etc/apt/sources.list.d/*.sources
-          sudo tee /etc/apt/sources.list.d/amd64.sources >/dev/null <<EOF
-          Types: deb
-          URIs: http://archive.ubuntu.com/ubuntu/
-          Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports
-          Components: main restricted universe multiverse
-          Architectures: amd64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-          Types: deb
-          URIs: http://security.ubuntu.com/ubuntu/
-          Suites: ${CODENAME}-security
-          Components: main restricted universe multiverse
-          Architectures: amd64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-          EOF
-          echo "--- sources in effect ---"
-          cat /etc/apt/sources.list.d/*.sources
-
-          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main universe
-          EOF
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libdbus-1-dev:arm64 libx264-dev:arm64 libyuv-dev:arm64 \
-            libopus-dev:arm64 libpipewire-0.3-dev:arm64 \
-            libxcb1-dev:arm64 libxcb-xtest0-dev:arm64 libxcb-shm0-dev:arm64 \
-            libxcb-xfixes0-dev:arm64 libxcb-render0-dev:arm64 \
-            libwayland-dev:arm64 libxkbcommon-dev:arm64
-
-      # The SPA lives in another repo and is fetched by build.rs (include_str!).
-      # Node is not needed: build-webui.sh just downloads a tarball.
+      # The SPA lives in another repository and build.rs inlines it with
+      # include_str!. build-webui.sh just downloads a tarball, so no Node needed.
       - name: fetch the shared web UI
         run: bash build-webui.sh
 
-      # `cargo test` only for the native target. A cross-compiled arm64 test
-      # binary cannot be EXECUTED on an x86 runner:
-      #
-      #   error: test failed, to rerun pass `--bin easystream`
-      #     Exec format error (os error 8)
-      #
-      # For arm64 the value of this job is that the crate compiles and links
-      # against the arm64 libraries; the tests run in the native job.
+      # Native: the tests really execute here.
       - name: test
-        run: |
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
-            cargo test --release --target ${{ matrix.target }}
-          else
-            cargo check --release --all-targets --target ${{ matrix.target }}
-          fi
+        run: cargo test --release
 
       - name: build
         run: |
           set -euo pipefail
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release
           out="easystream-linux-${{ matrix.arch }}"
-          cp "target/${{ matrix.target }}/release/easystream" "/tmp/$out"
+          cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
           echo "ARTIFACT=$out" >> "$GITHUB_ENV"
 
-      # The binary must be able to find the libraries it links. A quick ldd shows
-      # what will be needed at run time, which is the difference between "works
-      # on the runner" and "works in the sandbox".
-      - name: report runtime dependencies
-        if: matrix.arch == 'amd64'
+      # What the binary needs at run time, which is the difference between "runs
+      # on the runner" and "runs in the sandbox".
+      - name: runtime dependencies
         run: ldd "/tmp/$ARTIFACT" || true
 
       - uses: actions/upload-artifact@v4
