@@ -1,0 +1,141 @@
+name: release
+
+# Build easystream (the Linux est daemon) for amd64 and arm64 and attach both to
+# the GitHub Release for the pushed tag.
+#
+# These release assets used to be produced by hand inside a build container, and
+# that path was fragile in ways only the image build revealed: apt needed a
+# reachable mirror, cargo needed a crates mirror, and the linker needed libopus
+# and libpipewire present or the portal shims silently dropped out. CI pins all
+# of that in one reviewable place.
+#
+# The system libraries this daemon links at BUILD time (x264, opus, yuv, xcb,
+# wayland-client, xkbcommon, dbus, pipewire) are compiled into the binary; the
+# runtime only needs the shared objects the distro already has for those
+# (x264/opus/pipewire are dlopen-style or linked, see the README). Building on
+# ubuntu-latest gives a modern glibc, which is why the artifact is named for the
+# distro family rather than pretending to be portable everywhere.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build assets for"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, target: x86_64-unknown-linux-gnu }
+          - { arch: arm64, target: aarch64-unknown-linux-gnu }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Everything build.rs probes for. Without libpipewire-0.3-dev the portal
+      # backend is skipped (`have_pw` false) and the crate still compiles — but
+      # the resulting binary cannot capture through Portal, and the link of
+      # na_portal_* fails outright. Keeping them explicit makes the dependency
+      # visible instead of implicit in a Dockerfile.
+      - name: system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libdbus-1-dev libx264-dev libyuv-dev libopus-dev \
+            libpipewire-0.3-dev \
+            libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libxcb-render0-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - name: cross toolchain (arm64)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Ubuntu maps arm64 to ports.ubuntu.com; the default archive only
+          # carries amd64 and would 404.
+          sudo sed -i 's|^deb |deb [arch=amd64] |' /etc/apt/sources.list || true
+          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main universe
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libdbus-1-dev:arm64 libx264-dev:arm64 libyuv-dev:arm64 \
+            libopus-dev:arm64 libpipewire-0.3-dev:arm64 \
+            libxcb1-dev:arm64 libxcb-xtest0-dev:arm64 libxcb-shm0-dev:arm64 \
+            libxcb-xfixes0-dev:arm64 libxcb-render0-dev:arm64 \
+            libwayland-dev:arm64 libxkbcommon-dev:arm64
+
+      # The SPA lives in another repo and is fetched by build.rs (include_str!).
+      # Node is not needed: build-webui.sh just downloads a tarball.
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: cargo test
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu: "1"
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.target }}
+          out="easystream-linux-${{ matrix.arch }}"
+          cp "target/${{ matrix.target }}/release/easystream" "/tmp/$out"
+          chmod +x "/tmp/$out"
+          ls -l "/tmp/$out"
+          echo "ARTIFACT=$out" >> "$GITHUB_ENV"
+
+      # The binary must be able to find the libraries it links. A quick ldd shows
+      # what will be needed at run time, which is the difference between "works
+      # on the runner" and "works in the sandbox".
+      - name: report runtime dependencies
+        if: matrix.arch == 'amd64'
+        run: ldd "/tmp/$ARTIFACT" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: /tmp/easystream-linux-*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/assets
+          merge-multiple: true
+      - run: ls -l /tmp/assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: /tmp/assets/easystream-linux-*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
