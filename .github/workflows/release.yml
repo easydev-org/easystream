@@ -155,8 +155,21 @@ jobs:
       - name: fetch the shared web UI
         run: bash build-webui.sh
 
-      - name: cargo test
-        run: cargo test --release --target ${{ matrix.target }}
+      # `cargo test` only for the native target. A cross-compiled arm64 test
+      # binary cannot be EXECUTED on an x86 runner:
+      #
+      #   error: test failed, to rerun pass `--bin easystream`
+      #     Exec format error (os error 8)
+      #
+      # For arm64 the value of this job is that the crate compiles and links
+      # against the arm64 libraries; the tests run in the native job.
+      - name: test
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            cargo test --release --target ${{ matrix.target }}
+          else
+            cargo check --release --all-targets --target ${{ matrix.target }}
+          fi
 
       - name: build
         run: |
