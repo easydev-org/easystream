@@ -84,12 +84,30 @@ jobs:
           CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
           echo "runner codename: $CODENAME"
 
-          # Keep amd64 sources on the default archive, restrict them to amd64 so
-          # apt never asks them for arm64 indexes.
-          sudo sed -i 's|^deb |deb [arch=amd64] |; s|^deb-src |deb-src [arch=amd64] |' \
-            /etc/apt/sources.list || true
-          sudo sed -i 's|^deb |deb [arch=amd64] |; s|^deb-src |deb-src [arch=amd64] |' \
-            /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          # Restrict the EXISTING sources to amd64, so apt never asks
+          # archive.ubuntu.com / security.ubuntu.com for arm64 indexes — they do
+          # not carry arm64 and answer 404:
+          #   E: Failed to fetch .../dists/noble/main/binary-arm64/Packages  404
+          #
+          # Ubuntu 24.04 (the runner image) describes repositories in deb822
+          # .sources files, NOT as `deb ...` lines, so rewriting `^deb ` matches
+          # nothing. Add the Architectures field to each stanza instead.
+          #
+          # Drop legacy one-line lists first: on a runner that still has them,
+          # they would reintroduce the arm64 queries.
+          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list || true
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -e "$f" ] || continue
+            sudo awk '
+              BEGIN { done = 0 }
+              /^Types:/ && !done { print; print "Architectures: amd64"; done = 1; next }
+              /^Architectures:/ { next }   # drop any existing one
+              { print }
+            ' "$f" | sudo tee "$f.new" >/dev/null
+            sudo mv "$f.new" "$f"
+          done
+          echo "--- sources after amd64 pinning ---"
+          grep -rE '^(URIs|Suites|Architectures):' /etc/apt/sources.list.d/*.sources 2>/dev/null | head -12
 
           sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<EOF
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main universe
