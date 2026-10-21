@@ -477,10 +477,19 @@ void *na_portal_open(void) {
             dict_add_u32(&ddict, "persist_mode", 2);
             if (p->restore_token && p->restore_token[0]) {
                 dict_add_str(&ddict, "restore_token", p->restore_token);
+                fprintf(stderr, "portal: SelectDevices token=%s persist_mode=2\n",
+                        p->restore_token);
+            } else {
+                // Say so loudly: without a token the portal WILL prompt, and in a
+                // headless guest that means the session never starts at all.
+                fprintf(stderr, "portal: SelectDevices has NO restore token "
+                                "(checked %s) — Start will ask for consent\n",
+                        restore_token_path());
             }
             dbus_message_iter_close_container(&dit, &ddict);
             if (portal_call_iface(p, IFACE_RD, "SelectDevices", dm, reqpath) == 0) {
                 p->devices_ok = 1;
+                fprintf(stderr, "portal: SelectDevices ok\n");
             } else {
                 fprintf(stderr, "portal: RemoteDesktop.SelectDevices unavailable; "
                                 "input will fall back\n");
