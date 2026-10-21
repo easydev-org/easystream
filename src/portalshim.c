@@ -76,7 +76,12 @@ typedef struct {
 static const char *restore_token_path(void) {
     static char buf[512];
     const char *h = getenv("HOME");
-    snprintf(buf, sizeof(buf), "%s/.config/screencast-token", h ? h : "/root");
+    // The token that matters for input is the one in the "remote-desktop" table,
+    // not "screencast": SelectDevices looks up REMOTE_DESKTOP_TABLE, so a token
+    // taken from the screen cast table would never be found and Start would fall
+    // back to the consent dialog.
+    snprintf(buf, sizeof(buf), "%s/.config/remote-desktop-token",
+             h ? h : "/root");
     return buf;
 }
 
@@ -458,7 +463,21 @@ void *na_portal_open(void) {
             //   Expected type 'u' for option 'persist_mode', got 'b'
             // and because the failure is non-fatal by design, every input event
             // was then silently dropped — the desktop rendered and ignored clicks.
-            dict_add_u32(&ddict, "persist_mode", 0);
+            //
+            // It is 2 ("persist until revoked") on purpose. 0 means Start shows
+            // the consent dialog every time, and a headless guest has nobody to
+            // click it, so the session never starts. 2 lets the pre-baked token
+            // in the remote-desktop table be replayed instead.
+            //
+            // Unlike SelectSources, SelectDevices does NOT reject persistence on
+            // a RemoteDesktopSession: the "Remote desktop sessions cannot persist"
+            // check lives in screen-cast.c and only fires for SelectSources. The
+            // restore DATA that Start consumes is looked up from this table by
+            // this very token.
+            dict_add_u32(&ddict, "persist_mode", 2);
+            if (p->restore_token && p->restore_token[0]) {
+                dict_add_str(&ddict, "restore_token", p->restore_token);
+            }
             dbus_message_iter_close_container(&dit, &ddict);
             if (portal_call_iface(p, IFACE_RD, "SelectDevices", dm, reqpath) == 0) {
                 p->devices_ok = 1;
