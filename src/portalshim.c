@@ -436,7 +436,12 @@ void *na_portal_open(void) {
             dict_add_str(&ddict, "handle_token", tok);
             // 1 = keyboard, 2 = pointer (bitmask, from the RemoteDesktop API).
             dict_add_u32(&ddict, "types", 1 | 2);
-            dict_add_bool(&ddict, "persist_mode", 0);
+            // persist_mode is a u32 enum (0 = do not persist), not a bool. As a
+            // bool the portal rejects the whole call:
+            //   Expected type 'u' for option 'persist_mode', got 'b'
+            // and because the failure is non-fatal by design, every input event
+            // was then silently dropped — the desktop rendered and ignored clicks.
+            dict_add_u32(&ddict, "persist_mode", 0);
             dbus_message_iter_close_container(&dit, &ddict);
             if (portal_call_iface(p, IFACE_RD, "SelectDevices", dm, reqpath) == 0) {
                 p->devices_ok = 1;
