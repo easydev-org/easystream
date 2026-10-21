@@ -397,7 +397,24 @@ void *na_portal_open(void) {
     // 1) CreateSession
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
-    DBusMessage *m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "CreateSession");
+    // CreateSession on REMOTE DESKTOP, not ScreenCast.
+    //
+    // The two interfaces create different GObject types — ScreenCastSession and
+    // RemoteDesktopSession — and a session can only be driven by the interface
+    // family that created it:
+    //
+    //   screen-cast.c handle_select_sources:
+    //     if (IS_SCREEN_CAST_SESSION (session)) { ...state machine... }
+    //     else if (IS_REMOTE_DESKTOP_SESSION (session)) { can_select_sources ... }
+    //
+    // Creating it via ScreenCast and then calling RemoteDesktop.SelectDevices
+    // left the portal with a session it had to close, so every following
+    // SelectSources returned "Invalid session" and nothing ever streamed.
+    //
+    // RemoteDesktop is a superset for our purposes: it exposes CreateSession,
+    // SelectDevices, Start AND the Notify* input calls, while ScreenCast
+    // contributes SelectSources and OpenPipeWireRemote on the same session.
+    DBusMessage *m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_RD, "CreateSession");
     DBusMessageIter it, dict;
     dbus_message_iter_init_append(m, &it);
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
@@ -486,7 +503,10 @@ void *na_portal_open(void) {
     snprintf(tok, sizeof(tok), "est%u", id);
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
-    m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_SC, "Start");
+    // Start on RemoteDesktop: the session was created there, and Start belongs to
+    // the creating interface. Calling ScreenCast.Start on a RemoteDesktopSession
+    // returns "Sources not selected".
+    m = dbus_message_new_method_call(PORTAL_BUS, PORTAL_PATH, IFACE_RD, "Start");
     dbus_message_iter_init_append(m, &it);
     dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
     const char *parent = "";
