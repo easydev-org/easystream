@@ -32,6 +32,20 @@
 #define PORTAL_PATH "/org/freedesktop/portal/desktop"
 #define IFACE_SC "org.freedesktop.portal.ScreenCast"
 #define IFACE_REQ "org.freedesktop.portal.Request"
+#define IFACE_RD "org.freedesktop.portal.RemoteDesktop"
+
+// RemoteDesktop is the INPUT half of the same portal session ScreenCast uses.
+//
+// GNOME Shell and KDE Plasma are Wayland compositors that do not implement the
+// wlroots protocols (zwlr_virtual_pointer_v1, zwlr_virtual_keyboard_v1,
+// zwlr_screencopy_manager_v1). Their only input path is this portal interface,
+// which the sandbox previously left unimplemented — so `capabilities` reported
+// input=PortalRemoteDesktop while nothing could actually move the pointer.
+//
+// Both interfaces share ONE session: RemoteDesktop.SelectDevices declares what we
+// want (pointer + keyboard), ScreenCast.SelectSources declares what we capture,
+// and Start() starts both. That is why the calls are interleaved rather than
+// living in separate sessions.
 
 typedef struct {
     DBusConnection *conn;
@@ -39,6 +53,12 @@ typedef struct {
     char *restore_token;      // persisted across runs when available
     uint32_t node_id;
     int width, height;
+
+    // RemoteDesktop state. devices_ok is 0 when the portal would not give us
+    // input on this session (an older xdg-desktop-portal, or a backend without
+    // the interface), in which case the caller falls back rather than sending
+    // events that go nowhere.
+    int devices_ok;
 
     struct pw_thread_loop *loop;
     struct pw_stream *stream;
@@ -232,8 +252,6 @@ static int portal_call(na_portal *p, const char *method, DBusMessage *msg,
         dbus_message_unref(reply);
         return -1;
     }
-    // The portal RETURNS the request object path; do not guess it. (Guessing it
-    // wrong means the Response signal never matches and we block forever.)
     const char *rpath = req_path;
     char *returned = NULL;
     if (dbus_message_get_args(reply, &err, DBUS_TYPE_OBJECT_PATH, &returned, DBUS_TYPE_INVALID)
@@ -241,8 +259,42 @@ static int portal_call(na_portal *p, const char *method, DBusMessage *msg,
         rpath = returned;
     }
     dbus_message_unref(reply);
-    int code = wait_response(p, rpath, sh, node, w, h, tok);
-    return code;
+    return wait_response(p, rpath, sh, node, w, h, tok);
+}
+
+// portal_call_iface is portal_call for a caller-named interface and no results.
+//
+// portal_call hard-codes IFACE_SC because every ScreenCast call needs its reply
+// unpacked (session handle, node id, size). RemoteDesktop.SelectDevices needs
+// none of that — only "did it succeed" — so it gets this simpler form instead of
+// a second copy of the reply parsing.
+static int portal_call_iface(na_portal *p, const char *iface, const char *method,
+                             DBusMessage *msg, const char *req_path) {
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage *reply = call_sync(p, iface, method, msg, &err);
+    if (!reply) {
+        fprintf(stderr, "portal %s: %s\n", method, err.message ? err.message : "no reply");
+        dbus_error_free(&err);
+        return -1;
+    }
+    if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
+        DBusError e2; dbus_error_init(&e2);
+        dbus_set_error_from_message(&e2, reply);
+        fprintf(stderr, "portal %s error: %s\n", method, e2.message ? e2.message : "?");
+        dbus_error_free(&e2);
+        dbus_message_unref(reply);
+        return -1;
+    }
+    // Same reply handling as portal_call, but only the success code matters here.
+    const char *rpath = req_path;
+    char *returned = NULL;
+    if (dbus_message_get_args(reply, &err, DBUS_TYPE_OBJECT_PATH, &returned, DBUS_TYPE_INVALID)
+        && returned) {
+        rpath = returned;
+    }
+    dbus_message_unref(reply);
+    return wait_response(p, rpath, NULL, NULL, NULL, NULL, NULL) == 0 ? 0 : -1;
 }
 
 // ── PipeWire ────────────────────────────────────────────────────────────────
@@ -358,6 +410,41 @@ void *na_portal_open(void) {
         return NULL;
     }
     p->session_handle = sh;
+
+    // 1b) SelectDevices on RemoteDesktop, BEFORE SelectSources.
+    //
+    // The session is shared between the two interfaces, and RemoteDesktop wants
+    // to know which devices it may inject before the session is started. Doing
+    // this after Start() is rejected by the portal.
+    //
+    // Failure is NOT fatal: capture is the primary job, and an input-less
+    // sandbox is still better than no sandbox. devices_ok records the outcome so
+    // na_portal_rd_* can refuse rather than silently doing nothing.
+    p->devices_ok = 0;
+    {
+        snprintf(tok, sizeof(tok), "esd%u", id);
+        snprintf(reqpath, sizeof(reqpath),
+                 "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
+        DBusMessage *dm = dbus_message_new_method_call(
+            PORTAL_BUS, PORTAL_PATH, IFACE_RD, "SelectDevices");
+        if (dm) {
+            DBusMessageIter dit, ddict;
+            dbus_message_iter_init_append(dm, &dit);
+            dbus_message_iter_append_basic(&dit, DBUS_TYPE_OBJECT_PATH, &shp);
+            dbus_message_iter_open_container(&dit, DBUS_TYPE_ARRAY, "{sv}", &ddict);
+            dict_add_str(&ddict, "handle_token", tok);
+            // 1 = keyboard, 2 = pointer (bitmask, from the RemoteDesktop API).
+            dict_add_u32(&ddict, "types", 1 | 2);
+            dict_add_bool(&ddict, "persist_mode", 0);
+            dbus_message_iter_close_container(&dit, &ddict);
+            if (portal_call_iface(p, IFACE_RD, "SelectDevices", dm, reqpath) == 0) {
+                p->devices_ok = 1;
+            } else {
+                fprintf(stderr, "portal: RemoteDesktop.SelectDevices unavailable; "
+                                "input will fall back\n");
+            }
+        }
+    }
 
     // 2) SelectSources(types=MONITOR, persist_mode=2, restore_token)
     snprintf(tok, sizeof(tok), "ess%u", id);
@@ -487,6 +574,123 @@ void na_portal_size(void *h, int *w, int *hh) {
     na_portal *p = h;
     if (w) *w = p->width;
     if (hh) *hh = p->height;
+}
+
+
+// ── RemoteDesktop input ─────────────────────────────────────────────────────
+//
+// The input half of the shared portal session. Every call is a fire-and-forget
+// method on the session object; the portal injects into the compositor.
+//
+// All of them return -1 when SelectDevices did not succeed, so the Rust side can
+// fall back explicitly instead of pretending to have moved a pointer.
+
+static int rd_session_ok(na_portal *p) {
+    return p && p->conn && p->session_handle && p->devices_ok;
+}
+
+int na_portal_rd_move(void *h, double x, double y) {
+    na_portal *p = h;
+    if (!rd_session_ok(p)) return -1;
+    DBusMessage *m = dbus_message_new_method_call(
+        PORTAL_BUS, PORTAL_PATH, IFACE_RD, "NotifyPointerMotionAbsolute");
+    if (!m) return -1;
+    DBusMessageIter it;
+    dbus_message_iter_init_append(m, &it);
+    const char *shp = p->session_handle;
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
+    DBusMessageIter dict;
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&it, &dict);
+    dbus_uint32_t stream = 0;   // 0 = the session's sole stream
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &stream);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &x);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &y);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage *r = call_sync(p, IFACE_RD, "NotifyPointerMotionAbsolute", m, &err);
+    if (!r) { dbus_error_free(&err); return -1; }
+    int bad = dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR;
+    dbus_message_unref(r);
+    return bad ? -1 : 0;
+}
+
+int na_portal_rd_button(void *h, int button, int down) {
+    na_portal *p = h;
+    if (!rd_session_ok(p)) return -1;
+    DBusMessage *m = dbus_message_new_method_call(
+        PORTAL_BUS, PORTAL_PATH, IFACE_RD, "NotifyPointerButton");
+    if (!m) return -1;
+    DBusMessageIter it;
+    dbus_message_iter_init_append(m, &it);
+    const char *shp = p->session_handle;
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
+    DBusMessageIter dict;
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&it, &dict);
+    dbus_int32_t btn = button;
+    dbus_uint32_t state = down ? 1 : 0;   // 1 = pressed
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_INT32, &btn);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &state);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage *r = call_sync(p, IFACE_RD, "NotifyPointerButton", m, &err);
+    if (!r) { dbus_error_free(&err); return -1; }
+    int bad = dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR;
+    dbus_message_unref(r);
+    return bad ? -1 : 0;
+}
+
+int na_portal_rd_axis(void *h, double dx, double dy) {
+    na_portal *p = h;
+    if (!rd_session_ok(p)) return -1;
+    DBusMessage *m = dbus_message_new_method_call(
+        PORTAL_BUS, PORTAL_PATH, IFACE_RD, "NotifyPointerAxis");
+    if (!m) return -1;
+    DBusMessageIter it;
+    dbus_message_iter_init_append(m, &it);
+    const char *shp = p->session_handle;
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
+    DBusMessageIter dict;
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&it, &dict);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &dx);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &dy);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage *r = call_sync(p, IFACE_RD, "NotifyPointerAxis", m, &err);
+    if (!r) { dbus_error_free(&err); return -1; }
+    int bad = dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR;
+    dbus_message_unref(r);
+    return bad ? -1 : 0;
+}
+
+// na_portal_rd_key takes the guest's EVDEV keycode (what the browser sends via
+// xkb, already offset by 8 relative to X11). 1 = pressed, 0 = released.
+int na_portal_rd_key(void *h, int keycode, int down) {
+    na_portal *p = h;
+    if (!rd_session_ok(p)) return -1;
+    DBusMessage *m = dbus_message_new_method_call(
+        PORTAL_BUS, PORTAL_PATH, IFACE_RD, "NotifyKeyboardKeycode");
+    if (!m) return -1;
+    DBusMessageIter it;
+    dbus_message_iter_init_append(m, &it);
+    const char *shp = p->session_handle;
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_OBJECT_PATH, &shp);
+    DBusMessageIter dict;
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&it, &dict);
+    dbus_int32_t code = keycode;
+    dbus_uint32_t state = down ? 1 : 0;
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_INT32, &code);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &state);
+    DBusError err; dbus_error_init(&err);
+    DBusMessage *r = call_sync(p, IFACE_RD, "NotifyKeyboardKeycode", m, &err);
+    if (!r) { dbus_error_free(&err); return -1; }
+    int bad = dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR;
+    dbus_message_unref(r);
+    return bad ? -1 : 0;
+}
+
+int na_portal_rd_ok(void *h) {
+    return rd_session_ok(h) ? 1 : 0;
 }
 
 void na_portal_close(void *h) {

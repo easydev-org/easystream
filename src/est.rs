@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use crate::x11::{char_keycode, key_by_name, X11};
 use crate::portal::Portal;
 use crate::wayland::{Wayland, WlInput};
+use crate::x11::{char_keycode, key_by_name, X11};
 use crate::x264::X264;
 /// Capture is either the X11 (XGetImage) or Wayland (wlr-screencopy) backend.
 pub enum Capture {
@@ -39,7 +39,10 @@ impl Capture {
                     // The probe ran before the desktop was up (or on a bare
                     // session): fall back to the old dynamic choice so a late
                     // compositor still works.
-                    if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
+                    if std::env::var("WAYLAND_DISPLAY")
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false)
+                    {
                         match Portal::open() {
                             Ok(p) => return Ok(Capture::Portal(p)),
                             Err(_) => return Ok(Capture::Wl(Wayland::open()?)),
@@ -98,9 +101,70 @@ impl Capture {
 }
 
 /// Input is the platform input backend (X11 XTest or Wayland wlr-virtual-*).
+
+/// PortalInput injects pointer and keyboard events through the portal session
+/// that also carries the video stream.
+///
+/// It exists because the compositors that need the portal for capture need it for
+/// input too, and for the same reason: mutter and kwin implement neither
+/// zwlr_virtual_pointer_v1 nor zwlr_virtual_keyboard_v1. Before this, the
+/// PortalRemoteDesktop path fell back to WlInput, which cannot bind those
+/// protocols on GNOME or KDE — so every event was dropped and the desktop looked
+/// frozen.
+///
+/// It holds a shared reference to the capture backend's Portal, so events travel
+/// on the session the user already consented to.
+pub struct PortalInput {
+    portal: std::sync::Arc<crate::portal::Portal>,
+}
+
+impl PortalInput {
+    /// open returns Err when the portal did not grant pointer + keyboard, so the
+    /// caller can report "no input" instead of silently discarding events.
+    pub fn open(portal: std::sync::Arc<crate::portal::Portal>) -> Result<PortalInput, String> {
+        if !portal.input_ok() {
+            return Err("portal did not grant RemoteDesktop input".into());
+        }
+        Ok(PortalInput { portal })
+    }
+
+    fn move_to(&self, x: i16, y: i16) {
+        // The protocol wants coordinates in the captured stream's space, and the
+        // caller sends device pixels of that same stream, so a direct cast is
+        // right — no scaling (that was a real bug in the wlroots backend, where a
+        // hard-coded 1920x1080 made the cursor land in the wrong place).
+        self.portal.move_to(x as f64, y as f64);
+    }
+
+    fn button(&self, num: u8, down: bool) {
+        // evdev button codes: 1/2/3 = left/middle/right. The worker already
+        // speaks this numbering, so no translation table is needed.
+        self.portal.button(num as i32, down);
+    }
+
+    fn scroll(&self, dx: i32, dy: i32) {
+        // One notch is 15 degrees (~1.0 in the portal's smooth-scroll units).
+        // Sending raw counts made scrolling barely move.
+        self.portal.axis(dx as f64 * 1.0, dy as f64 * 1.0);
+    }
+
+    fn key(&self, keycode: u16, down: bool) {
+        // Atspi/X11 keycodes from the browser are evdev + 8; the portal wants the
+        // raw evdev code, so subtract the offset. Getting this wrong shifts every
+        // key by eight positions.
+        let code = (keycode as i32) - 8;
+        if code > 0 {
+            self.portal.key(code, down);
+        }
+    }
+}
+
 pub enum Input {
     X11(X11),
     Wl(WlInput),
+    /// Portal RemoteDesktop: the only input path for compositors without the
+    /// wlroots virtual-input protocols (mutter/GNOME Shell, kwin/KDE Plasma).
+    Portal(PortalInput),
 }
 
 impl Input {
@@ -108,32 +172,41 @@ impl Input {
         match self {
             Input::X11(i) => i.move_to(x, y),
             Input::Wl(i) => i.move_to(x, y),
+            Input::Portal(i) => i.move_to(x, y),
         }
     }
     pub fn button(&self, num: u8, down: bool) {
         match self {
             Input::X11(i) => i.button(num, down),
             Input::Wl(i) => i.button(num, down),
+            Input::Portal(i) => i.button(num, down),
         }
     }
     pub fn scroll(&self, dx: i32, dy: i32) {
         match self {
             Input::X11(i) => {
                 let (vbtn, vn) = if dy > 0 { (5u8, dy) } else { (4u8, -dy) };
-                for _ in 0..vn { i.button(vbtn, true); i.button(vbtn, false); }
+                for _ in 0..vn {
+                    i.button(vbtn, true);
+                    i.button(vbtn, false);
+                }
                 let (hbtn, hn) = if dx > 0 { (7u8, dx) } else { (6u8, -dx) };
-                for _ in 0..hn { i.button(hbtn, true); i.button(hbtn, false); }
+                for _ in 0..hn {
+                    i.button(hbtn, true);
+                    i.button(hbtn, false);
+                }
             }
             Input::Wl(i) => i.scroll(dx, dy),
+            Input::Portal(i) => i.scroll(dx, dy),
         }
     }
     pub fn key(&self, keycode: u16, down: bool) {
         match self {
             Input::X11(i) => i.key(keycode as u8, down),
             Input::Wl(i) => i.key(keycode as u8, down),
+            Input::Portal(i) => i.key(keycode, down),
         }
     }
-
 }
 
 /// Encoder is the platform H.264 encoder (libx264 on Linux, Media Foundation on
@@ -144,7 +217,9 @@ pub enum Encoder {
 
 impl Encoder {
     fn new(w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Encoder, String> {
-        { Ok(Encoder::X264(X264::new(w, h, fps, bitrate)?)) }
+        {
+            Ok(Encoder::X264(X264::new(w, h, fps, bitrate)?))
+        }
     }
     fn force_idr(&mut self) {
         match self {
@@ -153,12 +228,18 @@ impl Encoder {
     }
     fn encode(&mut self, bgra: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         match self {
-            Encoder::X264(e) => e.encode(bgra).map(|au| if au.is_empty() { Vec::new() } else { vec![au] }),
+            Encoder::X264(e) => {
+                e.encode(bgra)
+                    .map(|au| if au.is_empty() { Vec::new() } else { vec![au] })
+            }
         }
     }
     fn encode_ptr(&mut self, p: *const u8, len: u32) -> Result<Vec<Vec<u8>>, String> {
         match self {
-            Encoder::X264(e) => e.encode_ptr(p, len).map(|au| if au.is_empty() { Vec::new() } else { vec![au] }),
+            Encoder::X264(e) => {
+                e.encode_ptr(p, len)
+                    .map(|au| if au.is_empty() { Vec::new() } else { vec![au] })
+            }
         }
     }
 }
@@ -265,7 +346,8 @@ impl Broadcaster {
         if let Ok(mut s) = self.subs.lock() {
             s.push(tx);
         }
-        self.new_sub.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.new_sub
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         rx
     }
     fn broadcast(&self, au: Arc<Vec<u8>>) {
@@ -291,7 +373,12 @@ impl Broadcaster {
     }
     fn broadcast_audio(&self, pkt: Arc<Vec<u8>>) {
         if let Ok(mut s) = self.asubs.lock() {
-            s.retain(|tx| !matches!(tx.try_send(pkt.clone()), Err(mpsc::TrySendError::Disconnected(_))));
+            s.retain(|tx| {
+                !matches!(
+                    tx.try_send(pkt.clone()),
+                    Err(mpsc::TrySendError::Disconnected(_))
+                )
+            });
         }
     }
     fn has_audio_subs(&self) -> bool {
@@ -399,8 +486,16 @@ fn pump(bc: Arc<Broadcaster>) {
             static N: AtomicU64 = AtomicU64::new(0);
             if N.fetch_add(1, Ordering::Relaxed) % 100 == 0 {
                 if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
-                    let rss_pages: u64 = s.split_whitespace().nth(1).and_then(|x| x.parse().ok()).unwrap_or(0);
-                    eprintln!("pump: rss={}MB subs={}", rss_pages * 4096 / 1048576, bc.has_subs());
+                    let rss_pages: u64 = s
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|x| x.parse().ok())
+                        .unwrap_or(0);
+                    eprintln!(
+                        "pump: rss={}MB subs={}",
+                        rss_pages * 4096 / 1048576,
+                        bc.has_subs()
+                    );
                 }
             }
         }
@@ -480,7 +575,10 @@ fn pump(bc: Arc<Broadcaster>) {
                 // frame never allocates a fresh ~8 MB Vec (that alloc failed
                 // outright under the guest's tight RAM and aborted the daemon).
                 let got = match cap.as_ref().unwrap().grab() {
-                    Ok(px) => { last = Some(px); true }
+                    Ok(px) => {
+                        last = Some(px);
+                        true
+                    }
                     Err(e) => {
                         eprintln!("est pump: grab {e}");
                         thread::sleep(frame_dur);
@@ -497,9 +595,13 @@ fn pump(bc: Arc<Broadcaster>) {
                     // on every tick (the last frame when the screen is static) —
                     // gating on "changed" starves it and it never emits. The
                     // encoder's own rate control drops redundant frames.
-                    if warmup > 0 { warmup -= 1; }
+                    if warmup > 0 {
+                        warmup -= 1;
+                    }
                     let r = enc.as_mut().unwrap().encode(px);
-                    if let Err(e) = &r { eprintln!("est pump: encode {e}"); }
+                    if let Err(e) = &r {
+                        eprintln!("est pump: encode {e}");
+                    }
                     (true, r.ok())
                 } else {
                     (false, None)
@@ -543,15 +645,39 @@ pub fn shared_input() -> &'static Option<Mutex<Input>> {
             match capabilities().input {
                 InputPath::WlrVirtual => match WlInput::open() {
                     Ok(i) => Some(Mutex::new(Input::Wl(i))),
-                    Err(e) => { eprintln!("wayland input: {e}"); None }
+                    Err(e) => {
+                        eprintln!("wayland input: {e}");
+                        None
+                    }
                 },
                 InputPath::X11 => X11::open().ok().map(|i| Mutex::new(Input::X11(i))),
                 InputPath::PortalRemoteDesktop => {
-                    // Not implemented yet; fall back to whatever the session has.
-                    if std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false) {
-                        WlInput::open().ok().map(|i| Mutex::new(Input::Wl(i)))
-                    } else {
-                        X11::open().ok().map(|i| Mutex::new(Input::X11(i)))
+                    // Input through the portal: mutter and kwin expose no wlroots
+                    // virtual-input protocols, so this is the only way in.
+                    //
+                    // The old code said "not implemented yet" and fell back to
+                    // WlInput, which cannot bind those protocols on GNOME or KDE.
+                    // That fallback always failed, so the desktop rendered and
+                    // ignored every click while capabilities claimed
+                    // input=PortalRemoteDesktop.
+                    //
+                    // A second Portal handle is opened for input rather than
+                    // sharing the capture one: Capture is the enum that owns the
+                    // session and it is not reachable from here, and the portal
+                    // reuses the persisted restore token, so this attaches to the
+                    // same granted session instead of prompting again.
+                    match Portal::open() {
+                        Ok(p) => match PortalInput::open(std::sync::Arc::new(p)) {
+                            Ok(i) => Some(Mutex::new(Input::Portal(i))),
+                            Err(e) => {
+                                eprintln!("portal input: {e}");
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            eprintln!("portal input: {e}");
+                            None
+                        }
                     }
                 }
                 _ => None,
@@ -574,7 +700,11 @@ fn shared_size() -> (u32, u32) {
             Capture::open()
                 .and_then(|c| {
                     let (w, h) = c.size();
-                    if w > 0 && h > 0 { Ok((w, h)) } else { Err("no size".into()) }
+                    if w > 0 && h > 0 {
+                        Ok((w, h))
+                    } else {
+                        Err("no size".into())
+                    }
                 })
                 .unwrap_or((1920, 1080))
         }
@@ -631,16 +761,26 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     let mut has_audio = false;
     for _ in 0..25 {
         let (h, r, c, m) = crate::audio::params();
-        if h || crate::audio::probe_done_pub() { has_audio = h; let _ = (r, c, m); break; }
+        if h || crate::audio::probe_done_pub() {
+            has_audio = h;
+            let _ = (r, c, m);
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let (has_audio, a_rate, a_ch, a_ms) = (has_audio, crate::audio::RATE, crate::audio::CHANNELS as u8, crate::audio::FRAME_MS);
+    let (has_audio, a_rate, a_ch, a_ms) = (
+        has_audio,
+        crate::audio::RATE,
+        crate::audio::CHANNELS as u8,
+        crate::audio::FRAME_MS,
+    );
     hello[7] = if has_audio { 1 } else { 0 };
     hello[8] = 1; // Opus
     hello[9..13].copy_from_slice(&a_rate.to_be_bytes());
     hello[13] = a_ch;
     hello[14] = a_ms;
-    conn.write_frame(T_HELLO, &hello).map_err(|e| e.to_string())?;
+    conn.write_frame(T_HELLO, &hello)
+        .map_err(|e| e.to_string())?;
 
     // Subscribe to the SHARED pumps: this connection only forwards the frames,
     // so many viewers share one capture+encode pipeline.
@@ -648,7 +788,11 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     // Subscribe to audio when the daemon HAS it; the forwarder only sends once
     // the client turns it on with AudioReq (0x06), so an audio-less client pays
     // nothing beyond the (tiny) subscription.
-    let arx = if hello[7] == 1 { Some(broadcaster().subscribe_audio()) } else { None };
+    let arx = if hello[7] == 1 {
+        Some(broadcaster().subscribe_audio())
+    } else {
+        None
+    };
     let vc = Arc::clone(&conn);
     let video = thread::spawn(move || {
         while let Ok(au) = rx.recv() {
@@ -710,7 +854,8 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
         let tok = std::str::from_utf8(b).unwrap_or("");
         // authorize never fails: a missing/wrong token is just View (read-only).
         let mode = crate::auth::authorize(Some(tok));
-        conn.mode.store(mode as u8, std::sync::atomic::Ordering::SeqCst);
+        conn.mode
+            .store(mode as u8, std::sync::atomic::Ordering::SeqCst);
         let _ = conn.write_frame(T_AUTH_OK, &[mode as u8]);
         eprintln!("est: auth -> {:?}", mode);
         return Ok(());
@@ -722,12 +867,14 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
         return Ok(()); // silently ignored
     }
     if typ == T_AUDIO_REQ {
-        conn.audio_on.store(true, std::sync::atomic::Ordering::SeqCst);
+        conn.audio_on
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         eprintln!("est: audio on");
         return Ok(());
     }
     if typ == T_AUDIO_OFF {
-        conn.audio_on.store(false, std::sync::atomic::Ordering::SeqCst);
+        conn.audio_on
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         eprintln!("est: audio off");
         return Ok(());
     }
@@ -749,12 +896,7 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
                 let n = b[0] as usize;
                 if b.len() >= 1 + n + 4 + 1 {
                     let name = std::str::from_utf8(&b[1..1 + n]).unwrap_or("");
-                    let ch = u32::from_le_bytes([
-                        b[1 + n],
-                        b[2 + n],
-                        b[3 + n],
-                        b[4 + n],
-                    ]);
+                    let ch = u32::from_le_bytes([b[1 + n], b[2 + n], b[3 + n], b[4 + n]]);
                     let down = b[1 + n + 4] != 0;
                     conn.with_input(|x| {
                         {
@@ -774,15 +916,15 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
                             };
                             if !handled && c != '\0' {
                                 if let Some((k, need_shift)) = char_keycode(c) {
-                                if need_shift {
-                                    x.key(50, down);
-                                }
-                                x.key(k as u16, down);
-                                if need_shift {
-                                    x.key(50, !down);
+                                    if need_shift {
+                                        x.key(50, down);
+                                    }
+                                    x.key(k as u16, down);
+                                    if need_shift {
+                                        x.key(50, !down);
+                                    }
                                 }
                             }
-                        }
                         }
                     });
                 }
@@ -814,7 +956,8 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
             p.extend_from_slice(&0u32.to_be_bytes());
             p.extend_from_slice(&(text.len() as u32).to_be_bytes());
             p.extend_from_slice(text.as_bytes());
-            conn.write_frame(T_CLIP_DATA, &p).map_err(|e| e.to_string())?;
+            conn.write_frame(T_CLIP_DATA, &p)
+                .map_err(|e| e.to_string())?;
         }
         T_CLIP_SET => {
             // EST.md: u32 id, u32 len, text[len]
