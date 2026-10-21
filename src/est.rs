@@ -114,10 +114,36 @@ impl Capture {
 /// "g_object_set_qdata_full: assertion 'quark > 0' failed"). One Arc, cloned by
 /// both users, keeps a single session.
 fn shared_portal() -> Result<std::sync::Arc<Portal>, String> {
-    static P: OnceLock<Result<std::sync::Arc<Portal>, String>> = OnceLock::new();
-    P.get_or_init(|| Portal::open().map(std::sync::Arc::new))
-        .clone()
-        .map_err(|e| e.clone())
+    shared_portal_rc()
+}
+
+/// reset_portal drops the cached handle so the next shared_portal() reconnects.
+///
+/// Called when a capture attempt fails: the portal process may have died and
+/// come back, and the old DBusConnection is then dead. Without this the daemon
+/// retries against a stale connection forever.
+fn reset_portal() {
+    // OnceLock has no clear(), so the cached value is only dropped by using an
+    // AtomicPtr-free design: we keep a generation counter and rebuild. Simpler:
+    // store the Arc behind a Mutex<Option<..>> instead of OnceLock.
+    let _ = PORTAL.lock().map(|mut g| g.take());
+}
+
+/// PORTAL holds the one live session.
+///
+/// A Mutex<Option<..>> rather than OnceLock because the handle has to be
+/// discardable: a crashed portal leaves a dead connection, and retrying against
+/// it never succeeds.
+static PORTAL: std::sync::Mutex<Option<std::sync::Arc<Portal>>> = std::sync::Mutex::new(None);
+
+fn shared_portal_rc() -> Result<std::sync::Arc<Portal>, String> {
+    let mut g = PORTAL.lock().map_err(|e| e.to_string())?;
+    if let Some(p) = g.as_ref() {
+        return Ok(p.clone());
+    }
+    let fresh = std::sync::Arc::new(Portal::open()?);
+    *g = Some(fresh.clone());
+    Ok(fresh)
 }
 
 /// PortalInput injects pointer and keyboard events through the portal session
@@ -523,6 +549,13 @@ fn pump(bc: Arc<Broadcaster>) {
                 Ok(c) => cap = Some(c),
                 Err(e) => {
                     eprintln!("est pump: capture {e}");
+                    // The failure is usually "portal unavailable", i.e. the
+                    // cached DBusConnection points at a portal that has since
+                    // died (or that refused the session). Drop it so the next
+                    // attempt opens a NEW connection instead of retrying
+                    // against a dead one — which is what made the daemon report
+                    // the same error forever after a single failure.
+                    reset_portal();
                     thread::sleep(Duration::from_millis(500));
                     continue;
                 }
