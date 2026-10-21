@@ -19,7 +19,7 @@ use crate::x264::X264;
 pub enum Capture {
     X11(X11),
     Wl(Wayland),
-    Portal(Portal),
+    Portal(std::sync::Arc<Portal>),
 }
 
 impl Capture {
@@ -33,7 +33,7 @@ impl Capture {
             let caps = capabilities();
             match caps.capture {
                 CapturePath::ZwlrScreencopy => Ok(Capture::Wl(Wayland::open()?)),
-                CapturePath::Portal => Ok(Capture::Portal(Portal::open()?)),
+                CapturePath::Portal => Ok(Capture::Portal(shared_portal()?)),
                 CapturePath::X11 => Ok(Capture::X11(X11::open()?)),
                 CapturePath::None => {
                     // The probe ran before the desktop was up (or on a bare
@@ -43,7 +43,10 @@ impl Capture {
                         .map(|v| !v.is_empty())
                         .unwrap_or(false)
                     {
-                        match Portal::open() {
+                        // The SHARED session, so the input backend attaches to
+                        // the same one instead of asking the portal for a second
+                        // (which segfaults xdg-desktop-portal-gnome).
+                        match shared_portal() {
                             Ok(p) => return Ok(Capture::Portal(p)),
                             Err(_) => return Ok(Capture::Wl(Wayland::open()?)),
                         }
@@ -101,6 +104,21 @@ impl Capture {
 }
 
 /// Input is the platform input backend (X11 XTest or Wayland wlr-virtual-*).
+
+/// shared_portal returns the ONE portal session this process uses.
+///
+/// Capture and input MUST share it. Two sessions meant two
+/// CreateSession/SelectSources round trips, and xdg-desktop-portal-gnome
+/// segfaults when it is asked for a second screencast session while the first is
+/// live ("screen cast session owned by ':1.91' created" repeated, then
+/// "g_object_set_qdata_full: assertion 'quark > 0' failed"). One Arc, cloned by
+/// both users, keeps a single session.
+fn shared_portal() -> Result<std::sync::Arc<Portal>, String> {
+    static P: OnceLock<Result<std::sync::Arc<Portal>, String>> = OnceLock::new();
+    P.get_or_init(|| Portal::open().map(std::sync::Arc::new))
+        .clone()
+        .map_err(|e| e.clone())
+}
 
 /// PortalInput injects pointer and keyboard events through the portal session
 /// that also carries the video stream.
@@ -661,13 +679,10 @@ pub fn shared_input() -> &'static Option<Mutex<Input>> {
                     // ignored every click while capabilities claimed
                     // input=PortalRemoteDesktop.
                     //
-                    // A second Portal handle is opened for input rather than
-                    // sharing the capture one: Capture is the enum that owns the
-                    // session and it is not reachable from here, and the portal
-                    // reuses the persisted restore token, so this attaches to the
-                    // same granted session instead of prompting again.
-                    match Portal::open() {
-                        Ok(p) => match PortalInput::open(std::sync::Arc::new(p)) {
+                    // Share the capture session. Opening a second one made the
+                    // portal backend segfault — see shared_portal().
+                    match shared_portal() {
+                        Ok(p) => match PortalInput::open(p) {
                             Ok(i) => Some(Mutex::new(Input::Portal(i))),
                             Err(e) => {
                                 eprintln!("portal input: {e}");

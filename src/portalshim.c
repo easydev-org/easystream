@@ -7,10 +7,10 @@
 //
 // Handshake (all on the SESSION bus):
 //   CreateSession   -> session_handle
-//   SelectSources   -> types=MONITOR, persist_mode=2, restore_token=<saved>
-//   Start           -> streams [(node_id, size)], restore_token
+//   SelectSources   -> types=MONITOR, persist_mode=0
+//   Start           -> streams [(node_id, size)]
 //   OpenPipeWireRemote -> fd
-// The restore_token (seeded into the golden disk, see bake/) makes this
+// The pre-seeded PermissionStore entry (see bake/seed-screencast.sh) makes this
 // succeed with NO on-screen dialog, which is essential in a headless guest.
 //
 // Build: needs libpipewire-0.3 and libdbus-1 (see build.rs).
@@ -452,7 +452,7 @@ void *na_portal_open(void) {
         }
     }
 
-    // 2) SelectSources(types=MONITOR, persist_mode=2, restore_token)
+    // 2) SelectSources(types=MONITOR, persist_mode=0)
     snprintf(tok, sizeof(tok), "ess%u", id);
     snprintf(reqpath, sizeof(reqpath),
              "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
@@ -463,8 +463,20 @@ void *na_portal_open(void) {
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
     dict_add_str(&dict, "handle_token", tok);
     dict_add_u32(&dict, "types", 1);          // 1 = MONITOR
-    dict_add_u32(&dict, "persist_mode", 2);   // 2 = persist until revoked
-    if (p->restore_token) dict_add_str(&dict, "restore_token", p->restore_token);
+    // persist_mode 0 = "do not persist", and it has to be 0 here.
+    //
+    // It was 2 ("persist until revoked"), which makes the portal hand back a
+    // restore_token to store for next time. xdg-desktop-portal-gnome SEGFAULTS
+    // while handling that combination on this image — the daemon logs
+    //   screen cast session owned by ':1.91' created      (three times)
+    //   GLib-GObject-CRITICAL: g_object_set_qdata_full: assertion 'quark > 0'
+    // and dies, so every SelectSources fails and nothing streams.
+    //
+    // Persistence is not needed anyway: the disk ships a pre-seeded
+    // PermissionStore entry (bake/seed-screencast.sh), so the grant already
+    // exists and no dialog appears. A persisted token would only help across
+    // reboots, and the disk itself provides that.
+    dict_add_u32(&dict, "persist_mode", 0);
     dbus_message_iter_close_container(&it, &dict);
     if (portal_call(p, "SelectSources", m, reqpath, NULL, NULL, NULL, NULL, NULL) != 0) {
         return NULL;
