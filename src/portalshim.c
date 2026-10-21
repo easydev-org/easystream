@@ -66,6 +66,7 @@ typedef struct {
     struct pw_core *core;
     int got_frame;
     int stream_error;
+    unsigned long long frames; // total frames seen, for stall visibility
     uint8_t *last;            // BGRA copy of the newest frame
     size_t last_len;
     int stride;
@@ -322,11 +323,26 @@ static void on_process(void *data) {
             p->last = malloc(need);
             p->last_len = need;
         }
-        if (p->last && size >= need) {
-            memcpy(p->last, src, need);
+        // Accept the frame even when the buffer is SHORTER than height*stride.
+        //
+        // It usually is: the last row's padding is often not transmitted, so
+        // size is a few bytes (or a whole row) short of need. The old code
+        // required size >= need and therefore dropped every frame, which is why
+        // the stream sat in "streaming" with grab() reporting "no frame yet"
+        // forever. Copy what is actually there and leave the tail as it was.
+        size_t copy = size < need ? size : need;
+        if (p->last && copy > 0) {
+            memcpy(p->last, src, copy);
             p->stride = (int)stride;
             p->got_frame = 1;
         }
+        // Count frames so a stalled stream is visible in the log rather than
+        // looking identical to a working one.
+        p->frames = p->frames + 1;
+        if (p->frames == 1 || (p->frames % 300) == 0)
+            fprintf(stderr, "portal: frame #%llu %ux%u stride=%u size=%u need=%zu\n",
+                    (unsigned long long)p->frames, p->width, p->height,
+                    stride, size, need);
     }
     pw_stream_queue_buffer(p->stream, b);
 }
