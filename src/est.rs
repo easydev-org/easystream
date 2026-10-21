@@ -734,6 +734,27 @@ pub fn shared_input() -> &'static Option<Mutex<Input>> {
     })
 }
 
+/// known_size_hint returns a screen size WITHOUT touching the capture.
+///
+/// The handshake needs w/h, but opening the capture is a portal round trip that
+/// can wait on a consent dialog. This only answers from what the probe already
+/// knows, falling back to the configured default, so HELLO can be sent
+/// immediately. The authoritative size arrives with the first video frame once
+/// the capture is up.
+fn known_size_hint() -> (u32, u32) {
+    static SZ: OnceLock<(u32, u32)> = OnceLock::new();
+    *SZ.get_or_init(|| {
+        // X11 can be asked cheaply; a portal capture cannot.
+        if let Ok(x) = X11::open() {
+            let (w, h) = x.size();
+            if w > 0 && h > 0 {
+                return (w, h);
+            }
+        }
+        (1920, 1080)
+    })
+}
+
 /// shared_size returns the captured screen size, opening the capture ONCE (and
 /// reusing it for the pump).
 fn shared_size() -> (u32, u32) {
@@ -760,38 +781,22 @@ fn shared_size() -> (u32, u32) {
 }
 
 fn handle(stream: TcpStream) -> Result<(), String> {
-    // ONE shared input backend for the whole process. Creating a fresh one per
-    // connection was heavy (Wayland: a new wl_display + virtual keyboard;
-    // a new device) and made the daemon cost scale with viewers.
-    let input = shared_input();
-    // Screen size comes from the shared capture, never a per-connection capture:
-    // (a new session per viewer would re-open the capture), so a
-    // per-connection open meant N capture sessions.
-    let (w, h) = shared_size();
-    // Tell the Wayland input backend the extent absolute pointer motion is
-    // normalised against. The shim used to hard-code 1920x1080, so on any other
-    // screen the cursor landed in the wrong place.
-    if let Some(m) = input.as_ref() {
-        if let Ok(i) = m.lock() {
-            if let Input::Wl(wl) = &*i {
-                wl.set_output_size(w, h);
-            }
-        }
-    }
-    let conn = Arc::new(Conn {
-        stream: Mutex::new(stream.try_clone().map_err(|e| e.to_string())?),
-        // When auth is ON, an unauthenticated connection is READ-ONLY (View)
-        // until it sends a valid Auth frame — never Control by default.
-        audio_on: std::sync::atomic::AtomicBool::new(false),
-        mode: std::sync::atomic::AtomicU8::new(if crate::auth::is_open() {
-            crate::auth::Mode::Control as u8
-        } else {
-            crate::auth::Mode::View as u8
-        }),
-        input,
-        // (input is Option<Mutex<X11>>)
-        clipboard: Mutex::new(String::new()),
-    });
+    // NOTHING BLOCKING BEFORE HELLO.
+    //
+    // shared_input() opens the portal RemoteDesktop session and shared_size()
+    // opens the capture, which is a full CreateSession/SelectSources/Start round
+    // trip through xdg-desktop-portal. When the portal has to show its consent
+    // dialog — headless, so nobody clicks it — Start waits for its own timeout,
+    // and the client sat there with an open socket and not one byte back. It
+    // looked exactly like a broken daemon, and no amount of waiting helped.
+    //
+    // So the handshake goes out FIRST with whatever size is known, and the real
+    // size follows as soon as the capture is up.
+    let (early_w, early_h) = known_size_hint();
+    // The Conn is built AFTER the handshake: its `input` field comes from
+    // shared_input(), which opens the portal session and must not run before
+    // HELLO is on the wire.
+    let stream_for_conn = stream.try_clone().map_err(|e| e.to_string())?;
 
     // Hello (EST.md): version, codec, w, h, fps.
     // Hello: v1 7-byte core + an audio block (backwards compatible: a v1 client
@@ -800,8 +805,8 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     let mut hello = vec![0u8; 7 + 8];
     hello[0] = 1;
     hello[1] = 1; // H.264
-    hello[2..4].copy_from_slice(&(w as u16).to_be_bytes());
-    hello[4..6].copy_from_slice(&(h as u16).to_be_bytes());
+    hello[2..4].copy_from_slice(&(early_w as u16).to_be_bytes());
+    hello[4..6].copy_from_slice(&(early_h as u16).to_be_bytes());
     hello[6] = 30;
     // audio block @7: u8 present, u8 codec(1=Opus), u32 rate, u8 channels, u8 frame_ms
     // Audio availability: wait briefly for the one-time probe so the very first
@@ -827,8 +832,41 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     hello[9..13].copy_from_slice(&a_rate.to_be_bytes());
     hello[13] = a_ch;
     hello[14] = a_ms;
-    conn.write_frame(T_HELLO, &hello)
-        .map_err(|e| e.to_string())?;
+    // Write the handshake straight to the socket, before any Conn exists: the
+    // point is that nothing can block between accept() and this write.
+    {
+        let mut s = stream_for_conn.try_clone().map_err(|e| e.to_string())?;
+        let mut hdr = [0u8; 5];
+        hdr[0] = T_HELLO;
+        hdr[1..5].copy_from_slice(&(hello.len() as u32).to_be_bytes());
+        s.write_all(&hdr).map_err(|e| e.to_string())?;
+        s.write_all(&hello).map_err(|e| e.to_string())?;
+        s.flush().map_err(|e| e.to_string())?;
+    }
+
+    // NOW it is safe to touch the portal: the client already has its handshake.
+    let input = shared_input();
+    let (w, h) = shared_size();
+    if let Some(m) = input.as_ref() {
+        if let Ok(i) = m.lock() {
+            if let Input::Wl(wl) = &*i {
+                wl.set_output_size(w, h);
+            }
+        }
+    }
+    let conn = Arc::new(Conn {
+        stream: Mutex::new(stream_for_conn),
+        // When auth is ON, an unauthenticated connection is READ-ONLY (View)
+        // until it sends a valid Auth frame — never Control by default.
+        audio_on: std::sync::atomic::AtomicBool::new(false),
+        mode: std::sync::atomic::AtomicU8::new(if crate::auth::is_open() {
+            crate::auth::Mode::Control as u8
+        } else {
+            crate::auth::Mode::View as u8
+        }),
+        input,
+        clipboard: Mutex::new(String::new()),
+    });
 
     // Subscribe to the SHARED pumps: this connection only forwards the frames,
     // so many viewers share one capture+encode pipeline.
