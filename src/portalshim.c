@@ -422,6 +422,7 @@ void *na_portal_open(void) {
     // na_portal_rd_* can refuse rather than silently doing nothing.
     p->devices_ok = 0;
     {
+        const char *shp = p->session_handle;
         snprintf(tok, sizeof(tok), "esd%u", id);
         snprintf(reqpath, sizeof(reqpath),
                  "/org/freedesktop/portal/desktop/request/%s/%s", sender, tok);
