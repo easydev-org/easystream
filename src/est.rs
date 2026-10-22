@@ -181,9 +181,26 @@ impl PortalInput {
     }
 
     fn button(&self, num: u8, down: bool) {
-        // evdev button codes: 1/2/3 = left/middle/right. The worker already
-        // speaks this numbering, so no translation table is needed.
-        self.portal.button(num as i32, down);
+        // The wire number from the browser is the DOM/X11 convention
+        // (1 left, 2 middle, 3 right). The portal does NOT take that: the
+        // RemoteDesktop spec says the button "is encoded according to Linux Evdev
+        // button codes", i.e. BTN_LEFT=272, BTN_RIGHT=273, BTN_MIDDLE=274.
+        //
+        // Passing 1/2/3 straight through meant the compositor received codes that
+        // are not pointer buttons at all, so right click and double click did
+        // nothing (only the occasional press that mutter happened to tolerate
+        // appeared to work). Translating here fixes both on every portal backend.
+        let evdev = match num {
+            1 => 0x110, // BTN_LEFT   272
+            2 => 0x112, // BTN_MIDDLE 274
+            3 => 0x111, // BTN_RIGHT  273
+            4 => 0x113, // BTN_SIDE   275
+            5 => 0x114, // BTN_EXTRA  276
+            // Already an evdev code (or something we do not know): pass it on
+            // rather than silently dropping the event.
+            other => other as i32,
+        };
+        self.portal.button(evdev, down);
     }
 
     fn scroll(&self, dx: i32, dy: i32) {
