@@ -65,6 +65,7 @@ typedef struct {
     struct pw_context *context;
     struct pw_core *core;
     int got_frame;
+    int has_frame;   // a frame has EVER been written into last[]
     int stream_error;
     unsigned long long frames; // total frames seen, for stall visibility
     uint8_t *last;            // BGRA copy of the newest frame
@@ -335,6 +336,7 @@ static void on_process(void *data) {
             memcpy(p->last, src, copy);
             p->stride = (int)stride;
             p->got_frame = 1;
+            p->has_frame = 1;
         }
         // Count frames so a stalled stream is visible in the log rather than
         // looking identical to a working one.
@@ -637,8 +639,20 @@ int na_portal_start(void *h) {
 // na_portal_grab copies the newest BGRA frame into a freshly allocated buffer.
 int na_portal_grab(void *h, uint8_t **out, int *ow, int *oh) {
     na_portal *p = h;
-    for (int i = 0; i < 200 && !p->got_frame; i++) usleep(10000);
-    if (!p->got_frame || !p->last) return 0;
+    // Wait briefly for a NEW frame, but do not fail when none arrives.
+    //
+    // The portal capture is frame-driven: Mutter emits a buffer when the screen
+    // changes, so a static desktop delivers one frame and then nothing. Waiting
+    // only for got_frame made grab() return 0 forever after that single frame, so
+    // the pump never set its last buffer, the encoder was never fed, and a viewer
+    // sat on connecting with no video at all - while the stream itself was healthy
+    // and had already produced a frame.
+    //
+    // Newest available frame is the useful semantic: hand back the last frame we
+    // kept when no new one has arrived. Callers that care whether the screen
+    // actually changed do their own pixel comparison.
+    for (int i = 0; i < 200 && !p->got_frame && !p->has_frame; i++) usleep(10000);
+    if (!p->has_frame || !p->last) return 0;
     int w = p->width, hh = p->height;
     size_t len = (size_t)w * hh * 4;
     uint8_t *dst = malloc(len);
