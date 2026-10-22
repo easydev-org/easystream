@@ -43,6 +43,13 @@ void *na_x264_open(int w, int h, int fps, int bitrate) {
     // (avc1.42xxxx) rejects. We convert BGRA -> I420 ourselves below.
     x264_picture_alloc(&e->pic_in, X264_CSP_I420, w, h);
     e->width = w; e->height = h; e->fps = fps; e->pts = 0;
+    // The FIRST frame must be an IDR: a viewer configures its decoder from the
+    // stream and cannot start on a delta frame. x264 does normally emit an IDR
+    // first, but the pump overrides pic_in.i_type on every frame (AUTO when no
+    // keyframe was requested), and i_keyint_min = fps then makes x264 wait a
+    // full second before the next keyframe. Setting this here means the very
+    // first encode is a keyframe regardless of how the caller drives it.
+    e->force_idr = 1;
     return e;
 }
 
@@ -61,12 +68,14 @@ int na_x264_encode(void *enc, const uint8_t *bgra, uint8_t **out, int *outlen) {
         e->width, e->height);
     e->pic_in.i_pts = e->pts++;
     // A new viewer (or a keepalive) must get a decodable starting point.
-    if (e->force_idr) {
-        e->pic_in.i_type = X264_TYPE_IDR;
-        e->force_idr = 0;
-    } else {
-        e->pic_in.i_type = X264_TYPE_AUTO;
-    }
+    //
+    // The flag is NOT cleared here. x264 can return 0 bytes (internal delay) and
+    // the caller then drops the frame; clearing the flag up front lost the
+    // keyframe request, so a viewer that connected during warm-up waited a full
+    // keyint before its decoder could start and the canvas stayed black. It is
+    // cleared below, only once an access unit was actually produced.
+    int want_idr = e->force_idr;
+    e->pic_in.i_type = want_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
 
     x264_nal_t *nals;
     int n = 0;
@@ -75,6 +84,9 @@ int na_x264_encode(void *enc, const uint8_t *bgra, uint8_t **out, int *outlen) {
     int total = 0;
     for (int i = 0; i < n; i++) total += nals[i].i_payload;
     if (total == 0) return 0;
+    // A real access unit is being handed back, so a pending keyframe request has
+    // been honoured. An IDR was requested for this picture iff i_type was IDR.
+    if (want_idr) e->force_idr = 0;
     uint8_t *buf = (uint8_t *)malloc(total);
     int off = 0;
     for (int i = 0; i < n; i++) {
