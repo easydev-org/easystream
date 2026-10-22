@@ -836,9 +836,17 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     // point is that nothing can block between accept() and this write.
     {
         let mut s = stream_for_conn.try_clone().map_err(|e| e.to_string())?;
-        let mut hdr = [0u8; 5];
+        // SIX bytes, matching Conn::write_frame and the browser's parser: byte 0
+        // is the type, byte 1 is reserved, bytes 2..6 are the big-endian length
+        // (app.js reads the length with getUint32(2)). An earlier 5-byte header
+        // here shifted the whole payload by one byte, so the browser read the
+        // version from the codec field and the size from garbage: it configured
+        // its decoder for w=32772 h=14366 and never saw the 1024x768 that was
+        // actually being sent, so no frame ever decoded and the canvas stayed
+        // black while the stream looked perfectly healthy.
+        let mut hdr = [0u8; 6];
         hdr[0] = T_HELLO;
-        hdr[1..5].copy_from_slice(&(hello.len() as u32).to_be_bytes());
+        hdr[2..6].copy_from_slice(&(hello.len() as u32).to_be_bytes());
         s.write_all(&hdr).map_err(|e| e.to_string())?;
         s.write_all(&hello).map_err(|e| e.to_string())?;
         s.flush().map_err(|e| e.to_string())?;
