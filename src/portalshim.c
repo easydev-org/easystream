@@ -698,7 +698,15 @@ int na_portal_rd_move(void *h, double x, double y) {
     DBusMessageIter dict;
     dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &dict);
     dbus_message_iter_close_container(&it, &dict);
-    dbus_uint32_t stream = 0;   // 0 = the session's sole stream
+    // The stream id from Start's streams list, not 0.
+    //
+    // 0 was assumed to mean "the session's sole stream", but the portal treats it
+    // as a node id and rejects the call: NotifyPointerMotionAbsolute takes the
+    // actual PipeWire node, which start_done reports as the first member of each
+    // a(ua{sv}) entry. With 0 the pointer never moved, so every click from the
+    // web ui was silently dropped while capabilities still advertised
+    // input=PortalRemoteDesktop.
+    dbus_uint32_t stream = p->node_id;
     dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &stream);
     dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &x);
     dbus_message_iter_append_basic(&it, DBUS_TYPE_DOUBLE, &y);
