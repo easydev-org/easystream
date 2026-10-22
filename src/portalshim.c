@@ -540,6 +540,14 @@ void *na_portal_open(void) {
     // exists and no dialog appears. A persisted token would only help across
     // reboots, and the disk itself provides that.
     dict_add_u32(&dict, "persist_mode", 0);
+    // cursor_mode: 1 = EMBEDDED, i.e. draw the pointer INTO the frames.
+    //
+    // Omitting it leaves the portal default of 0 (HIDDEN), so the guest's own
+    // cursor was never composited into the capture and a remote viewer had no
+    // pointer at all - the desktop responded to clicks but nothing showed where
+    // the pointer was. 2 (METADATA) would instead require the client to render
+    // its own cursor from position updates, which this protocol does not carry.
+    dict_add_u32(&dict, "cursor_mode", 1);
     dbus_message_iter_close_container(&it, &dict);
     if (portal_call(p, "SelectSources", m, reqpath, NULL, NULL, NULL, NULL, NULL) != 0) {
         return NULL;
