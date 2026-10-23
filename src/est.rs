@@ -476,6 +476,40 @@ impl Broadcaster {
     }
 }
 
+/// Every live connection, so a reconfiguration can be announced to all of them.
+///
+/// Hello is the only authoritative statement of video geometry (EST.md), so a
+/// viewer that is already connected must receive a new one when the encoder is
+/// rebuilt - otherwise it keeps decoding at the old size and shows garbage. Weak
+/// references because a closed connection must not be kept alive by this list.
+static CONNS: OnceLock<Mutex<Vec<std::sync::Weak<Conn>>>> = OnceLock::new();
+
+fn conns() -> &'static Mutex<Vec<std::sync::Weak<Conn>>> {
+    CONNS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Register a connection and drop the entries that have since closed.
+fn register_conn(c: &Arc<Conn>) {
+    if let Ok(mut v) = conns().lock() {
+        v.retain(|w| w.strong_count() > 0);
+        v.push(Arc::downgrade(c));
+    }
+}
+
+/// send_hello_to_all re-announces the current video configuration to every live
+/// connection. Called after a ConfigSet has rebuilt the encoder; the payload is
+/// rebuilt per call so it reflects the geometry that is actually running.
+fn send_hello_to_all() {
+    let payload = hello_payload();
+    if let Ok(v) = conns().lock() {
+        for w in v.iter() {
+            if let Some(c) = w.upgrade() {
+                let _ = c.write_frame(T_HELLO, &payload);
+            }
+        }
+    }
+}
+
 static BC: OnceLock<Arc<Broadcaster>> = OnceLock::new();
 
 fn broadcaster() -> Arc<Broadcaster> {
@@ -863,6 +897,43 @@ fn shared_size() -> (u32, u32) {
     })
 }
 
+/// Build a Hello for the CURRENT video configuration.
+///
+/// Used both for the first handshake and for the re-announcement after a
+/// ConfigSet: the geometry must come from vcfg (what the encoder emits), and the
+/// capture size only as a fallback for the very first hello, before any encoder
+/// exists.
+fn hello_payload() -> Vec<u8> {
+    let (early_w, early_h) = known_size_hint();
+    hello_payload_with(early_w, early_h)
+}
+
+fn hello_payload_with(early_w: u32, early_h: u32) -> Vec<u8> {
+    // 7 (core) + 8 (audio) + 8 (video block at offset 15) = 23 bytes.
+    let mut hello = vec![0u8; 7 + 8 + 8];
+    hello[0] = 1;
+    hello[1] = 1; // H.264
+    let (out_w, out_h) = {
+        let (ow, oh) = crate::vcfg::VIDEO.output();
+        if ow != 0 && oh != 0 { (ow, oh) } else { (early_w, early_h) }
+    };
+    hello[2..4].copy_from_slice(&(out_w as u16).to_be_bytes());
+    hello[4..6].copy_from_slice(&(out_h as u16).to_be_bytes());
+    hello[6] = crate::vcfg::VIDEO.fps();
+
+    // Audio: do not block here. On the first hello the probe usually finished
+    // already; a re-announcement must not stall the caller for seconds waiting
+    // for something it already knows.
+    let has_audio = crate::audio::probe_done_pub() && crate::audio::params().0;
+    hello[7] = if has_audio { 1 } else { 0 };
+    hello[8] = 1; // Opus
+    hello[9..13].copy_from_slice(&crate::audio::RATE.to_be_bytes());
+    hello[13] = crate::audio::CHANNELS as u8;
+    hello[14] = crate::audio::FRAME_MS;
+    hello[15..23].copy_from_slice(&crate::vcfg::hello_block());
+    hello
+}
+
 fn handle(stream: TcpStream) -> Result<(), String> {
     // NOTHING BLOCKING BEFORE HELLO.
     //
@@ -886,45 +957,7 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     // reads the first 7 bytes and ignores the rest; `length` tells it how much
     // to skip). Audio is advertised only when an audio capture actually opened.
     // 7 + 8 (audio) + 8 (video block, EST.md offset 15) = 23 bytes.
-    let mut hello = vec![0u8; 7 + 8 + 8];
-    hello[0] = 1;
-    hello[1] = 1; // H.264
-    // Report what the encoder is ACTUALLY configured to emit, not the capture
-    // size: once someone picks 标清 the two differ, and a client that configures
-    // WebCodecs for the capture size would reject every frame.
-    let (out_w, out_h) = {
-        let (ow, oh) = crate::vcfg::VIDEO.output();
-        if ow != 0 && oh != 0 { (ow, oh) } else { (early_w, early_h) }
-    };
-    hello[2..4].copy_from_slice(&(out_w as u16).to_be_bytes());
-    hello[4..6].copy_from_slice(&(out_h as u16).to_be_bytes());
-    hello[6] = crate::vcfg::VIDEO.fps();
-    // audio block @7: u8 present, u8 codec(1=Opus), u32 rate, u8 channels, u8 frame_ms
-    // Audio availability: wait briefly for the one-time probe so the very first
-    // Hello is accurate (it is sent once per connection, worth the wait).
-    let mut has_audio = false;
-    for _ in 0..25 {
-        let (h, r, c, m) = crate::audio::params();
-        if h || crate::audio::probe_done_pub() {
-            has_audio = h;
-            let _ = (r, c, m);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let (has_audio, a_rate, a_ch, a_ms) = (
-        has_audio,
-        crate::audio::RATE,
-        crate::audio::CHANNELS as u8,
-        crate::audio::FRAME_MS,
-    );
-    hello[7] = if has_audio { 1 } else { 0 };
-    hello[8] = 1; // Opus
-    hello[9..13].copy_from_slice(&a_rate.to_be_bytes());
-    hello[13] = a_ch;
-    hello[14] = a_ms;
-    // Video block at offset 15 (hasVideoConfig, encoder, flags, bitrate, keyint).
-    hello[15..23].copy_from_slice(&crate::vcfg::hello_block());
+    let hello = hello_payload_with(early_w, early_h);
     // Write the handshake straight to the socket, before any Conn exists: the
     // point is that nothing can block between accept() and this write.
     {
@@ -968,6 +1001,9 @@ fn handle(stream: TcpStream) -> Result<(), String> {
         input,
         clipboard: Mutex::new(String::new()),
     });
+
+    // Announce the new geometry to every viewer, including this one.
+    register_conn(&conn);
 
     // Subscribe to the SHARED pumps: this connection only forwards the frames,
     // so many viewers share one capture+encode pipeline.
@@ -1135,6 +1171,12 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
                     crate::vcfg::VIDEO.bitrate(),
                     crate::vcfg::VIDEO.generation()
                 );
+                // Hello is the only authoritative statement of geometry
+                // (EST.md), so every connected viewer - not just the one that
+                // asked - must be told what the encoder now emits. Without this,
+                // viewers that stayed connected kept decoding at the old size
+                // and showed garbage until they reconnected.
+                send_hello_to_all();
                 // Ack BEFORE the new Hello: the client uses the ack to stop
                 // showing a spinner, and the Hello (sent by the pump once the new
                 // encoder exists) to reconfigure its decoder.
