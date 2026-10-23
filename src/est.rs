@@ -632,6 +632,10 @@ fn pump(bc: Arc<Broadcaster>) {
             match Encoder::new(ow, oh, fps, br) {
                 Ok(e) => {
                     crate::vcfg::VIDEO.set_active_encoder(e.kind());
+                    eprintln!(
+                        "est pump: encoder opened {}x{} fps={} br={} gen={} kind={}",
+                        ow, oh, fps, br, gen, e.kind()
+                    );
                     enc = Some(e);
                     enc_gen = gen;
                     // The new encoder starts with no reference frames, and the
@@ -1113,20 +1117,31 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
         // client can change bitrate alone. Anything malformed is refused rather
         // than guessed at: a half-parsed request would change the stream in ways
         // the client did not ask for.
+        eprintln!("est: ConfigSet n={} bytes", b.len());
         let (p, err) = parse_config(b);
         if let Some(e) = err {
+            eprintln!("est: ConfigSet parse failed: {e}");
             let _ = conn.write_frame(T_CONFIG_ACK, &ack(false, &e));
             return Ok(());
         }
         let p = p.unwrap();
         match crate::vcfg::VIDEO.apply(&p) {
             Ok(()) => {
+                let (ow, oh) = crate::vcfg::VIDEO.output();
+                eprintln!(
+                    "est: ConfigSet ok -> {}x{} fps={} br={} gen={}",
+                    ow, oh,
+                    crate::vcfg::VIDEO.fps(),
+                    crate::vcfg::VIDEO.bitrate(),
+                    crate::vcfg::VIDEO.generation()
+                );
                 // Ack BEFORE the new Hello: the client uses the ack to stop
                 // showing a spinner, and the Hello (sent by the pump once the new
                 // encoder exists) to reconfigure its decoder.
                 let _ = conn.write_frame(T_CONFIG_ACK, &ack(true, ""));
             }
             Err(e) => {
+                eprintln!("est: ConfigSet rejected: {e}");
                 let _ = conn.write_frame(T_CONFIG_ACK, &ack(false, &e));
             }
         }
