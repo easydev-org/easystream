@@ -73,6 +73,35 @@ A client MUST re-read Hello on every reconfiguration. The server sends a fresh
 Hello after applying a `ConfigSet`, and that is what tells the client to
 reconfigure its decoder; Hello is the only authoritative statement of geometry.
 
+### Decoded size vs. input size
+
+Offsets 2-6 are the DECODED size: the geometry the client must configure its
+decoder for. That is also the coordinate space of `0x10 Move` on every platform
+whose input backend takes stream coordinates - portal, wlroots and X11 all do.
+
+Android is the exception. Its input path is `input touchscreen`, which expects
+DEVICE pixels, and a downscaled stream would otherwise place every tap at the
+wrong point. A server in that position sets `flags` bit2 and reports the DEVICE
+size at offsets 2-6, keeping the ENCODED size in the video block:
+
+```
+flags bit2 = 1  => offsets 2-6 are the INPUT size (device pixels), and the client
+                   must scale pointer coordinates by (devW/encW, devH/encH)
+                   before sending them.
+```
+
+For that to work the block also carries the encoded size explicitly:
+
+```
+offset 23: u16 encodedWidth
+          25: u16 encodedHeight
+```
+
+A client that sees bit2 must configure its decoder for the ENCODED size and map
+pointer coordinates from its view onto the INPUT size; a client that does not
+see bit2 uses offsets 2-6 for both, which is what every platform before Android
+did.
+
 ## Video (S->C)
 
 ```
