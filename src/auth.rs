@@ -107,5 +107,9 @@ pub fn is_mutation(typ: u8) -> bool {
         0x10 | 0x11 | 0x12 | 0x13 | 0x14   // pointer + keyboard
         | 0x26                              // a11y ActionReq
         | 0x32                              // ClipSet
+        // ConfigSet changes what EVERY viewer receives, so it belongs to the
+        // control plane: without this a read-only viewer could force 标清 on
+        // everybody watching the same sandbox.
+        | 0x08
     )
 }

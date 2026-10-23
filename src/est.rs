@@ -287,12 +287,36 @@ impl Encoder {
             Encoder::X264(e) => e.force_idr(),
         }
     }
+    /// The EST.md encoder code for Hello. Must describe what is ACTUALLY running,
+    /// not what was requested: a VAAPI request that fell back to x264 has to
+    /// report x264 or the UI would promise hardware acceleration it is not
+    /// getting.
+    fn kind(&self) -> u8 {
+        match self {
+            Encoder::X264(_) => crate::vcfg::ENC_X264,
+        }
+    }
     fn encode(&mut self, bgra: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         match self {
             Encoder::X264(e) => {
                 e.encode(bgra)
                     .map(|au| if au.is_empty() { Vec::new() } else { vec![au] })
             }
+        }
+    }
+    /// Encode a zero-copy frame, scaling from the capture geometry when the
+    /// encoder is emitting something smaller (标清/高清).
+    fn encode_ptr_sized(
+        &mut self,
+        p: *const u8,
+        len: u32,
+        sw: u32,
+        sh: u32,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        match self {
+            Encoder::X264(e) => e
+                .encode_ptr_scaled(p, len, sw, sh)
+                .map(|au| if au.is_empty() { Vec::new() } else { vec![au] }),
         }
     }
     fn encode_ptr(&mut self, p: *const u8, len: u32) -> Result<Vec<Vec<u8>>, String> {
@@ -306,6 +330,11 @@ impl Encoder {
 }
 
 const T_HELLO: u8 = 0x01;
+/// Run-time reconfiguration (EST.md 0x08/0x09). A client asks; the server owns
+/// the encoder and answers with ConfigAck, then a fresh Hello once the new
+/// encoder is live.
+const T_CONFIG_SET: u8 = 0x08;
+const T_CONFIG_ACK: u8 = 0x09;
 const T_VIDEO: u8 = 0x02;
 const T_MOVE: u8 = 0x10;
 const T_BUTTON: u8 = 0x11;
@@ -518,6 +547,9 @@ fn pump(bc: Arc<Broadcaster>) {
     let frame_dur = Duration::from_millis(33);
     let mut cap: Option<Capture> = None;
     let mut enc: Option<Encoder> = None;
+    // Which vcfg generation the current encoder was built from. A mismatch means
+    // a ConfigSet landed and the encoder must be rebuilt.
+    let mut enc_gen: u32 = u32::MAX;
     // Dirty-frame detection: skip encoding when the screen did not change (a
     // static desktop then costs almost no CPU). We still emit one frame every
     // `keepalive_frames` so the stream stays warm and late joiners get data.
@@ -578,10 +610,35 @@ fn pump(bc: Arc<Broadcaster>) {
                 }
             }
         }
-        let (w, h) = cap.as_ref().unwrap().size();
-        if enc.is_none() {
-            match Encoder::new(w, h, 30, 12_000_000) {
-                Ok(e) => enc = Some(e),
+        let (cap_w, cap_h) = cap.as_ref().unwrap().size();
+        // Publish the capture size once. vcfg keeps capture and OUTPUT geometry
+        // apart: the compositor owns the former (we cannot change it), a
+        // ConfigSet owns the latter.
+        crate::vcfg::VIDEO.set_capture(cap_w, cap_h);
+
+        // Rebuild whenever a ConfigSet was accepted. The generation check covers
+        // both the first encoder and every later change, so the literal
+        // parameters that used to live here are gone.
+        let gen = crate::vcfg::VIDEO.generation();
+        let stale = enc.is_none() || gen != enc_gen;
+        if stale {
+            let (ow, oh) = crate::vcfg::VIDEO.output();
+            let fps = crate::vcfg::VIDEO.fps() as u32;
+            let br = crate::vcfg::VIDEO.bitrate();
+            // Drop the old encoder BEFORE opening the new one: VAAPI and x264
+            // both keep GPU/thread resources, and on a small sandbox holding two
+            // encoders at once is what made the second open fail.
+            enc = None;
+            match Encoder::new(ow, oh, fps, br) {
+                Ok(e) => {
+                    crate::vcfg::VIDEO.set_active_encoder(e.kind());
+                    enc = Some(e);
+                    enc_gen = gen;
+                    // The new encoder starts with no reference frames, and the
+                    // client reset gotKey when it saw the new Hello, so the very
+                    // first frame out of it must be an IDR.
+                    bc.new_sub.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 Err(e) => {
                     eprintln!("est pump: encoder {e}");
                     thread::sleep(Duration::from_millis(500));
@@ -629,7 +686,9 @@ fn pump(bc: Arc<Broadcaster>) {
                         Some(buf) if buf.len() == n => buf.copy_from_slice(cur),
                         _ => prev = Some(cur.to_vec()),
                     }
-                    (true, enc.as_mut().unwrap().encode_ptr(p, n as u32).ok())
+                    // Pass the CAPTURE size: the encoder may be emitting a
+                    // smaller frame, and libyuv scales on the way in.
+                    (true, enc.as_mut().unwrap().encode_ptr_sized(p, n as u32, cap_w, cap_h).ok())
                 } else {
                     (false, None)
                 }
@@ -666,7 +725,10 @@ fn pump(bc: Arc<Broadcaster>) {
                     if warmup > 0 {
                         warmup -= 1;
                     }
-                    let r = enc.as_mut().unwrap().encode(px);
+                    // Same reason as the zero-copy path: px is a capture-sized
+                    // BGRA buffer, so encode_ptr_sized lets libyuv scale it.
+                    let r = enc.as_mut().unwrap().encode_ptr_sized(
+                        px.as_ptr(), px.len() as u32, cap_w, cap_h);
                     if let Err(e) = &r {
                         eprintln!("est pump: encode {e}");
                     }
@@ -819,12 +881,20 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     // Hello: v1 7-byte core + an audio block (backwards compatible: a v1 client
     // reads the first 7 bytes and ignores the rest; `length` tells it how much
     // to skip). Audio is advertised only when an audio capture actually opened.
-    let mut hello = vec![0u8; 7 + 8];
+    // 7 + 8 (audio) + 8 (video block, EST.md offset 15) = 23 bytes.
+    let mut hello = vec![0u8; 7 + 8 + 8];
     hello[0] = 1;
     hello[1] = 1; // H.264
-    hello[2..4].copy_from_slice(&(early_w as u16).to_be_bytes());
-    hello[4..6].copy_from_slice(&(early_h as u16).to_be_bytes());
-    hello[6] = 30;
+    // Report what the encoder is ACTUALLY configured to emit, not the capture
+    // size: once someone picks 标清 the two differ, and a client that configures
+    // WebCodecs for the capture size would reject every frame.
+    let (out_w, out_h) = {
+        let (ow, oh) = crate::vcfg::VIDEO.output();
+        if ow != 0 && oh != 0 { (ow, oh) } else { (early_w, early_h) }
+    };
+    hello[2..4].copy_from_slice(&(out_w as u16).to_be_bytes());
+    hello[4..6].copy_from_slice(&(out_h as u16).to_be_bytes());
+    hello[6] = crate::vcfg::VIDEO.fps();
     // audio block @7: u8 present, u8 codec(1=Opus), u32 rate, u8 channels, u8 frame_ms
     // Audio availability: wait briefly for the one-time probe so the very first
     // Hello is accurate (it is sent once per connection, worth the wait).
@@ -849,6 +919,8 @@ fn handle(stream: TcpStream) -> Result<(), String> {
     hello[9..13].copy_from_slice(&a_rate.to_be_bytes());
     hello[13] = a_ch;
     hello[14] = a_ms;
+    // Video block at offset 15 (hasVideoConfig, encoder, flags, bitrate, keyint).
+    hello[15..23].copy_from_slice(&crate::vcfg::hello_block());
     // Write the handshake straight to the socket, before any Conn exists: the
     // point is that nothing can block between accept() and this write.
     {
@@ -955,6 +1027,65 @@ fn control_loop(conn: &Arc<Conn>, mut s: TcpStream) -> Result<(), String> {
     }
 }
 
+/// Parse a 0x08 ConfigSet body into a Patch.
+///
+/// The cursor walks the frame strictly: every field knows its own length, and a
+/// frame that ends early is an error, not a partial patch. Truncation is the
+/// most likely corruption here (a client that grew a field and an older daemon
+/// reading it), and applying half of it would move the stream somewhere nobody
+/// asked for.
+fn parse_config(b: &[u8]) -> (Option<crate::vcfg::Patch>, Option<String>) {
+    let mut p = crate::vcfg::Patch::default();
+    let mut i = 0usize;
+    let need = |i: usize, n: usize| i + n <= b.len();
+    if !need(i, 1) { return (None, Some("truncated: hasWidth".into())); }
+    if b[i] != 0 {
+        if !need(i + 1, 2) { return (None, Some("truncated: width".into())); }
+        p.width = Some(u16::from_be_bytes([b[i + 1], b[i + 2]]) as u32);
+    }
+    i += 3;
+    if !need(i, 1) { return (None, Some("truncated: hasHeight".into())); }
+    if b[i] != 0 {
+        if !need(i + 1, 2) { return (None, Some("truncated: height".into())); }
+        p.height = Some(u16::from_be_bytes([b[i + 1], b[i + 2]]) as u32);
+    }
+    i += 3;
+    if !need(i, 1) { return (None, Some("truncated: hasFps".into())); }
+    if b[i] != 0 {
+        if !need(i + 1, 1) { return (None, Some("truncated: fps".into())); }
+        p.fps = Some(b[i + 1]);
+    }
+    i += 2;
+    if !need(i, 1) { return (None, Some("truncated: hasBitrate".into())); }
+    if b[i] != 0 {
+        if !need(i + 1, 4) { return (None, Some("truncated: bitrate".into())); }
+        p.bitrate = Some(u32::from_be_bytes([
+            b[i + 1], b[i + 2], b[i + 3], b[i + 4],
+        ]));
+    }
+    i += 5;
+    if !need(i, 1) { return (None, Some("truncated: hasEncoder".into())); }
+    if b[i] != 0 {
+        if !need(i + 1, 1) { return (None, Some("truncated: encoder".into())); }
+        let e = b[i + 1];
+        // 0xFF is the documented "let the server pick" value; translate it to the
+        // Patch's 0 so vcfg keeps one meaning for zero.
+        p.encoder = Some(if e == 0xFF { 0 } else { e });
+    }
+    (Some(p), None)
+}
+
+/// Build a 0x09 ConfigAck body: ok byte, then a length-prefixed UTF-8 reason.
+fn ack(ok: bool, msg: &str) -> Vec<u8> {
+    let m = msg.as_bytes();
+    let m = &m[..m.len().min(255)];
+    let mut v = Vec::with_capacity(2 + m.len());
+    v.push(if ok { 1 } else { 0 });
+    v.push(m.len() as u8);
+    v.extend_from_slice(m);
+    v
+}
+
 fn u16at(b: &[u8], o: usize) -> i16 {
     i16::from_be_bytes([b[o], b[o + 1]])
 }
@@ -976,6 +1107,30 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
         && crate::auth::is_mutation(typ)
     {
         return Ok(()); // silently ignored
+    }
+    if typ == T_CONFIG_SET {
+        // 0x08 layout (EST.md): every field carries its own has* flag, so a
+        // client can change bitrate alone. Anything malformed is refused rather
+        // than guessed at: a half-parsed request would change the stream in ways
+        // the client did not ask for.
+        let (p, err) = parse_config(b);
+        if let Some(e) = err {
+            let _ = conn.write_frame(T_CONFIG_ACK, &ack(false, &e));
+            return Ok(());
+        }
+        let p = p.unwrap();
+        match crate::vcfg::VIDEO.apply(&p) {
+            Ok(()) => {
+                // Ack BEFORE the new Hello: the client uses the ack to stop
+                // showing a spinner, and the Hello (sent by the pump once the new
+                // encoder exists) to reconfigure its decoder.
+                let _ = conn.write_frame(T_CONFIG_ACK, &ack(true, ""));
+            }
+            Err(e) => {
+                let _ = conn.write_frame(T_CONFIG_ACK, &ack(false, &e));
+            }
+        }
+        return Ok(());
     }
     if typ == T_AUDIO_REQ {
         conn.audio_on

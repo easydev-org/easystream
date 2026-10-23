@@ -106,6 +106,73 @@ void na_x264_close(void *enc) {
 }
 
 // na_x264_force_idr makes the NEXT encoded frame an IDR (keyframe).
+// na_x264_encode_scaled is na_x264_encode for a frame whose captured size differs
+// from the encoder's. libyuv scales and converts in one pass (I420Scale needs an
+// intermediate I420, so scaling during the colour convert is both faster and one
+// buffer less).
+//
+// Scaling HERE, not in the capture backend, is deliberate: wlr screencopy and
+// X11 XGetImage both hand back the compositor's size and neither can be asked
+// for another one without tearing the pipeline down. The encoder is the first
+// place that legitimately owns an output geometry.
+int na_x264_encode_scaled(void *enc, const uint8_t *bgra, int src_w, int src_h,
+                          uint8_t **out, int *outlen) {
+    na_x264 *e = (na_x264 *)enc;
+    *out = NULL; *outlen = 0;
+    if (src_w == e->width && src_h == e->height) {
+        return na_x264_encode(enc, bgra, out, outlen);
+    }
+    // Convert at the SOURCE size first, then scale the planes into x264's own
+    // buffers. ARGBScale would need RGB24, which is an extra conversion.
+    static thread_local uint8_t *tmp = NULL;
+    static thread_local size_t tmp_cap = 0;
+    size_t need = (size_t)src_w * src_h * 3 / 2;
+    if (tmp_cap < need) {
+        uint8_t *p = (uint8_t *)realloc(tmp, need);
+        if (!p) return -1;
+        tmp = p; tmp_cap = need;
+    }
+    uint8_t *py = tmp;
+    uint8_t *pu = tmp + (size_t)src_w * src_h;
+    uint8_t *pv = pu + (size_t)(src_w / 2) * (src_h / 2);
+    libyuv::ARGBToI420(
+        bgra, src_w * 4,
+        py, src_w,
+        pu, src_w / 2,
+        pv, src_w / 2,
+        src_w, src_h);
+    libyuv::I420Scale(
+        py, src_w,
+        pu, src_w / 2,
+        pv, src_w / 2,
+        src_w, src_h,
+        e->pic_in.img.plane[0], e->pic_in.img.i_stride[0],
+        e->pic_in.img.plane[1], e->pic_in.img.i_stride[1],
+        e->pic_in.img.plane[2], e->pic_in.img.i_stride[2],
+        e->width, e->height,
+        libyuv::kFilterBilinear);
+    e->pic_in.i_pts = e->pts++;
+    int want_idr = e->force_idr;
+    e->pic_in.i_type = want_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
+    x264_nal_t *nals;
+    int n = 0;
+    int rc = x264_encoder_encode(e->enc, &nals, &n, &e->pic_in, &e->pic_out);
+    if (rc < 0) return -1;
+    int total = 0;
+    for (int i = 0; i < n; i++) total += nals[i].i_payload;
+    if (total == 0) return 0;
+    if (want_idr) e->force_idr = 0;
+    uint8_t *buf = (uint8_t *)malloc(total);
+    if (!buf) return -1;
+    int off = 0;
+    for (int i = 0; i < n; i++) {
+        memcpy(buf + off, nals[i].p_payload, nals[i].i_payload);
+        off += nals[i].i_payload;
+    }
+    *out = buf; *outlen = total;
+    return n;
+}
+
 void na_x264_force_idr(void *enc) {
     na_x264 *e = (na_x264 *)enc;
     if (e) e->force_idr = 1;

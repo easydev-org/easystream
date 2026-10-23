@@ -20,6 +20,7 @@ mod portal;
 mod probe;
 mod x11;
 mod x264;
+mod vcfg;
 
 
 use std::env;

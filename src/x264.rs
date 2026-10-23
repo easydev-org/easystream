@@ -5,6 +5,14 @@ use std::ffi::c_void;
 
 extern "C" {
     fn na_x264_open(w: libc::c_int, h: libc::c_int, fps: libc::c_int, bitrate: libc::c_int) -> *mut c_void;
+    fn na_x264_encode_scaled(
+        enc: *mut c_void,
+        bgra: *const u8,
+        sw: libc::c_int,
+        sh: libc::c_int,
+        out: *mut *mut u8,
+        outlen: *mut libc::c_int,
+    ) -> libc::c_int;
     fn na_x264_encode(
         enc: *mut c_void,
         bgra: *const u8,
@@ -45,6 +53,42 @@ impl X264 {
 
     /// encode_ptr encodes a BGRA frame given a raw pointer + byte length. Lets
     /// the caller pass a pointer straight into the capture buffer (no Vec copy).
+    /// Encode a frame whose captured geometry differs from the encoder's.
+    ///
+    /// libyuv scales and converts in one pass on the C side. When the sizes
+    /// match this forwards to the plain path, so a caller can always use it
+    /// without paying for a comparison-then-branch here.
+    pub fn encode_ptr_scaled(
+        &mut self,
+        bgra: *const u8,
+        len: u32,
+        sw: u32,
+        sh: u32,
+    ) -> Result<Vec<u8>, String> {
+        unsafe {
+            let _ = len;
+            let mut out: *mut u8 = std::ptr::null_mut();
+            let mut outlen: libc::c_int = 0;
+            let rc = na_x264_encode_scaled(
+                self.enc,
+                bgra,
+                sw as libc::c_int,
+                sh as libc::c_int,
+                &mut out,
+                &mut outlen,
+            );
+            if rc < 0 {
+                return Err("x264 encode (scaled) failed".into());
+            }
+            if out.is_null() || outlen <= 0 {
+                return Ok(Vec::new());
+            }
+            let v = std::slice::from_raw_parts(out, outlen as usize).to_vec();
+            libc::free(out as *mut c_void);
+            Ok(v)
+        }
+    }
+
     pub fn encode_ptr(&mut self, bgra: *const u8, len: u32) -> Result<Vec<u8>, String> {
         unsafe {
             let _ = len;
