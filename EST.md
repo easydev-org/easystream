@@ -46,6 +46,33 @@ On connect the server sends `Hello` immediately (no client preface):
 The client then sends control frames; the server streams `Video` frames as they
 are produced (it starts the capture+encode pipeline on connect).
 
+### Video block (Hello extension, appended at offset 15)
+
+Video used to be described by four bytes at offsets 2-6 and nothing else, so a
+client could not tell a hardware encoder from a software one, or learn the
+bitrate it was about to receive. The block below is APPENDED, never interleaved:
+every existing field keeps its offset, and a client that reads only up to the
+audio block (offset 14) parses a Hello exactly as before.
+
+```
+offset 15: u8  hasVideoConfig  1 = the fields below are present
+          16: u8  encoder       1 = x264 (software)   2 = VAAPI
+                                3 = Media Foundation  4 = VideoToolbox
+                                5 = MediaCodec        0 = unknown
+          17: u8  flags         bit0 = geometry/fps/bitrate can be changed at
+                                       run time via ConfigSet
+                                bit1 = the encoder is hardware accelerated
+          18: u32 bitrate       bits per second, big-endian
+          22: u8  keyint        keyframe interval in frames
+```
+
+`hasVideoConfig = 0` means the server does not implement this block: treat the
+geometry at offsets 2-6 as the whole truth and offer the user no quality control.
+
+A client MUST re-read Hello on every reconfiguration. The server sends a fresh
+Hello after applying a `ConfigSet`, and that is what tells the client to
+reconfigure its decoder; Hello is the only authoritative statement of geometry.
+
 ## Video (S->C)
 
 ```
@@ -156,6 +183,68 @@ be in flight on the one connection).
 0x40 ShotReq:  u32 id, u8 regionLen, region[regionLen]  ("" = full screen)
 0x41 ShotResp: u32 id, u32 pngLen, png[pngLen]
 ```
+
+## Reconfiguration (quality / encoder)
+
+The server owns the encoder, so the client asks for changes rather than making
+them. Every field carries its own `has*` flag, so a client can change bitrate
+without touching geometry, and the server rebuilds the encoder only when
+something actually differs.
+
+```
+0x08 ConfigSet (C->S):
+  u8  hasWidth,   u16 width       (0 = unchanged)
+  u8  hasHeight,  u16 height      (0 = unchanged)
+  u8  hasFps,     u8  fps         (0 = unchanged)
+  u8  hasBitrate, u32 bitrate     (0 = unchanged; bits per second)
+  u8  hasEncoder, u8  encoder     (0 = unchanged, 0xFF = let the server pick)
+
+0x09 ConfigAck (S->C):
+  u8  ok          1 = applied
+  u8  errLen, err[errLen]        UTF-8 reason when ok = 0
+```
+
+A successful ConfigSet always produces, in this order:
+
+1. the encoder is torn down and rebuilt with the new parameters,
+2. the next encoded frame is forced to be an IDR (so nothing waits for a natural
+   keyframe),
+3. a fresh `Hello` is sent, carrying the new geometry and video block,
+4. `ConfigAck` with `ok = 1`.
+
+Sending Hello BEFORE the first new `Video` frame is what lets the client
+reconfigure `VideoDecoder` in time; a client that reconfigures after the first
+frame sees exactly one garbled frame, which is why the order is fixed here.
+
+Refusals are honest: an unsupported `encoder`, a geometry the capture source
+cannot produce, or a bitrate outside the sane range must answer `ok = 0` with a
+reason, and leave the running configuration untouched.
+
+A client in VIEW mode MUST NOT be able to reconfigure (see Auth): quality is a
+control-plane operation and is dropped with the other mutations.
+
+### Quality presets
+
+The UI offers three named presets, and every platform must map them the same way
+so that "高清" means the same thing on Linux, Windows, macOS and Android. The
+presets are a CLIENT-side convenience: they are expanded into a ConfigSet with
+explicit fields, so the wire protocol itself never carries a preset name.
+
+| Preset | UI label | Scale | fps | Bitrate |
+|--------|----------|-------|-----|---------|
+| 0 | 标清 (SD)     | longest side 1280 | 30 | 3 Mbps |
+| 1 | 高清 (HD)     | longest side 1920 | 30 | 8 Mbps |
+| 2 | 原画 (native) | capture size, unchanged | 30 | 20 Mbps |
+
+Scaling is applied after capture and before encode, preserving aspect ratio and
+rounding to even dimensions (H.264 requires even width and height in 4:2:0).
+
+"原画" sends the capture geometry unchanged, which is the only preset that
+guarantees no rescale — and therefore the only one whose CPU cost is not
+dominated by the scaler. A server that cannot scale (a platform whose capture
+source only offers one size) may refuse presets 0 and 1 with ok = 0; it must not
+pretend to have applied them.
+
 
 ## Keepalive / control
 
