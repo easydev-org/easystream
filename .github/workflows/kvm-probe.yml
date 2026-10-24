@@ -1,0 +1,24 @@
+name: kvm-probe
+
+# Throwaway probe: does the documented-but-unsupported nested-virtualization
+# label actually hand out a usable /dev/kvm? The docs call nested VMs
+# "experimental ... at your own risk", and the label is silently ignored on
+# runner classes that cannot provide it - which would make a bake fail with
+# "KVM not available" and look like a code bug. Measure it instead of
+# trusting the documentation in either direction.
+on:
+  workflow_dispatch:
+
+jobs:
+  plain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/kvm-probe.sh plain
+
+  nested:
+    runs-on:
+      labels: [ubuntu-latest, nested-virtualization.enabled=true]
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/kvm-probe.sh nested
