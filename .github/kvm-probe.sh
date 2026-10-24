@@ -1,40 +1,47 @@
 #!/usr/bin/env bash
-# Report whether this runner can actually give QEMU hardware acceleration.
-# $1 is just a label for the log.
+# Can this runner actually run a KVM guest? Three things have to line up:
+#   1. /dev/kvm exists
+#   2. the CPU exposes vmx/svm and the kvm module has nested=1
+#   3. THIS user may open the device
+# GitHub ships /dev/kvm as root:kvm 0660, so step 3 fails for the runner user
+# until a udev rule opens it up - which is what the well-known "Enable KVM
+# group perms" snippet does. Test all three instead of stopping at step 1.
 set -uo pipefail
 echo "=========== runner: ${1:-?} ==========="
-echo "--- /dev/kvm ---"
+echo "--- 1. device ---"
 ls -la /dev/kvm 2>&1 || echo "NO /dev/kvm"
-echo "--- cpu virtualization flag ---"
-grep -m1 -oE "(vmx|svm)" /proc/cpuinfo || echo "no vmx/svm in /proc/cpuinfo"
-echo "--- kvm module nested param ---"
+echo "--- 2. cpu + nested ---"
+grep -m1 -oE "(vmx|svm)" /proc/cpuinfo || echo "no vmx/svm"
 for m in kvm_intel kvm_amd; do
   p="/sys/module/$m/parameters/nested"
-  if [ -e "$p" ]; then echo "$m nested=$(cat $p)"; else echo "$m not loaded"; fi
+  [ -e "$p" ] && echo "$m nested=$(cat $p)" || echo "$m not loaded"
 done
-echo "--- kvm in lsmod ---"
-lsmod 2>/dev/null | grep -E "^kvm" || echo "no kvm modules"
+echo "--- 3. permission as $(id -un) ---"
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then echo "readable/writable"; else echo "NOT permitted for this user (root:kvm 0660)"; fi
 
-if [ ! -e /dev/kvm ]; then
-  echo "RESULT: NO KVM - a bake here would run under TCG (10-50x slower)"
-  exit 0
-fi
+echo "--- open it up the way CI does ---"
+echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=kvm
+sleep 1
+ls -la /dev/kvm
 
 echo "--- install qemu ---"
 sudo apt-get update -qq >/dev/null 2>&1
 sudo apt-get install -y -qq qemu-system-x86 >/dev/null 2>&1
 qemu-system-x86_64 --version | head -1
 
-# The only honest test: create a KVM VM and see whether it starts. -kernel
-# /dev/null is invalid on purpose - we only care whether KVM initialises
-# before the kernel load is attempted.
-echo "--- qemu -enable-kvm smoke test ---"
-out=$(timeout 30 qemu-system-x86_64 -enable-kvm -cpu host -m 512 -display none -no-reboot -kernel /dev/null 2>&1 || true)
-echo "$out" | head -5
-if echo "$out" | grep -qiE "kvm (init|version)|Could not access KVM"; then
-  echo "RESULT: KVM OPENED (message above is about the bogus -kernel, not KVM)"
-elif echo "$out" | grep -qi "permission denied"; then
-  echo "RESULT: /dev/kvm EXISTS BUT NOT PERMITTED"
+# A real VM: 512M, no disk, boot the BIOS and let it print. If KVM is refused
+# we see "failed to initialize kvm"; if it works the machine simply idles
+# until the timeout, so treat "no kvm error" as success.
+echo "--- booting a throwaway VM with -enable-kvm ---"
+out=$(timeout 20 qemu-system-x86_64 -enable-kvm -cpu host -m 512 \
+        -display none -no-reboot -serial stdio 2>&1 </dev/null || true)
+echo "$out" | tail -8
+if echo "$out" | grep -qiE "failed to initialize kvm|could not access kvm|permission denied"; then
+  echo "RESULT: KVM NOT USABLE"
+elif echo "$out" | grep -qiE "seaBIOS|Booting|No bootable"; then
+  echo "RESULT: KVM WORKS - a guest actually started"
 else
-  echo "RESULT: see message above"
+  echo "RESULT: no KVM error, but no guest output either (see log)"
 fi
