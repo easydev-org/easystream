@@ -738,9 +738,12 @@ fn pump(bc: Arc<Broadcaster>) {
                         Some(buf) if buf.len() == n => buf.copy_from_slice(cur),
                         _ => prev = Some(cur.to_vec()),
                     }
-                    // Pass the CAPTURE size: the encoder may be emitting a
-                    // smaller frame, and libyuv scales on the way in.
-                    (true, enc.as_mut().unwrap().encode_ptr_sized(p, n as u32, cap_w, cap_h).ok())
+                    // Pass the FRAME's size (w, h), NOT cap_w/cap_h: those come
+                    // from size(), while w/h are what this buffer actually holds.
+                    // They coincide on X11 but there is no reason to rely on it -
+                    // and on Windows the same shortcut is what broke capture, so
+                    // the source geometry is now always the buffer's own.
+                    (true, enc.as_mut().unwrap().encode_ptr_sized(p, n as u32, w, h).ok())
                 } else {
                     (false, None)
                 }
@@ -779,8 +782,13 @@ fn pump(bc: Arc<Broadcaster>) {
                     }
                     // Same reason as the zero-copy path: px is a capture-sized
                     // BGRA buffer, so encode_ptr_sized lets libyuv scale it.
+                    // Same rule: the buffer's own length decides the slice, so
+                    // derive the source geometry from it rather than from
+                    // cap_w/cap_h. px is always cap_w*cap_h*4 here, but deriving
+                    // it keeps one rule instead of two.
+                    let (sw, sh) = (cap_w, cap_h);
                     let r = enc.as_mut().unwrap().encode_ptr_sized(
-                        px.as_ptr(), px.len() as u32, cap_w, cap_h);
+                        px.as_ptr(), px.len() as u32, sw, sh);
                     if let Err(e) = &r {
                         eprintln!("est pump: encode {e}");
                     }
