@@ -335,6 +335,11 @@ const T_HELLO: u8 = 0x01;
 /// encoder is live.
 const T_CONFIG_SET: u8 = 0x08;
 const T_CONFIG_ACK: u8 = 0x09;
+/// Ask for an IDR without changing any configuration (EST.md 0x0A). The latch it
+/// sets is the same one a new subscriber sets, so N requests in one frame
+/// interval produce exactly one IDR - which matters, because a client reacts to
+/// a corrupt picture by asking again every frame and an IDR is expensive.
+const T_KEYFRAME_REQ: u8 = 0x0A;
 const T_VIDEO: u8 = 0x02;
 const T_MOVE: u8 = 0x10;
 const T_BUTTON: u8 = 0x11;
@@ -429,6 +434,15 @@ struct Broadcaster {
 }
 
 impl Broadcaster {
+    /// request_keyframe asks the pump for an IDR on its next frame.
+    ///
+    /// The same latch a new subscriber sets, so this is idempotent: a client that
+    /// asks on every frame gets one IDR per frame interval, not one per request.
+    fn request_keyframe(&self) {
+        self.new_sub
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn subscribe(&self) -> mpsc::Receiver<Arc<Vec<u8>>> {
         // Bounded so a slow/stalled viewer cannot grow an unbounded backlog in
         // the daemon (it just drops frames for THAT viewer).
@@ -1147,6 +1161,13 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
         && crate::auth::is_mutation(typ)
     {
         return Ok(()); // silently ignored
+    }
+    if typ == T_KEYFRAME_REQ {
+        // Not a mutation: it changes no guest state, so a read-only viewer may
+        // use it. Refusing it would strand a viewer on a corrupt picture with no
+        // way to recover.
+        broadcaster().request_keyframe();
+        return Ok(());
     }
     if typ == T_CONFIG_SET {
         // 0x08 layout (EST.md): every field carries its own has* flag, so a

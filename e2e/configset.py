@@ -89,6 +89,8 @@ def main():
     host, port = sys.argv[1], int(sys.argv[2])
     s = ws_connect(host, port)
     fr = est_frames(ws_payloads(s, 5))
+    authoks = [pl for t, pl in fr if t == 0x04]
+    print("authok:", [a.hex() for a in authoks], "(1=control, 0=view)")
     hellos = [pl for t, pl in fr if t == 0x01 and len(pl) >= 7]
     print("frames:", [(hex(t), len(pl)) for t, pl in fr][:6])
     if not hellos:

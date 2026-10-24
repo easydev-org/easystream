@@ -252,6 +252,54 @@ reason, and leave the running configuration untouched.
 A client in VIEW mode MUST NOT be able to reconfigure (see Auth): quality is a
 control-plane operation and is dropped with the other mutations.
 
+## Keyframe request (PLI)
+
+A decoder that loses a frame cannot recover until the next IDR. The encoder emits
+one every `keyint` frames (2 s by default), so a single lost packet costs up to
+two seconds of a frozen or smeared picture. Every video stack solves this with a
+keyframe request; this is ours.
+
+```
+0x0A KeyFrameReq (C->S): empty
+```
+
+The server forces the NEXT encoded frame to be an IDR and sends it to all
+viewers. No acknowledgement: the client keeps showing the last good frame until
+the IDR arrives, and an IDR it asked for is indistinguishable from one it did not.
+
+Requests are coalesced. A client that floods the server with KeyFrameReq does not
+get one IDR per request - the flag is a single latch, so N requests during one
+frame interval produce one IDR. This matters because the natural reaction of a
+client to a corrupted frame is to ask again on the next frame, and an IDR is
+expensive (it is many times the size of a P-frame).
+
+KeyFrameReq is NOT a mutation: it changes no guest state and no configuration, so
+a read-only viewer may send it. Refusing it would leave a viewer stuck on a
+corrupt picture with no way to recover.
+
+## Adaptive bitrate
+
+The encoder's bitrate is a promise the client can revoke. A client that measures
+its own throughput and finds the stream is starving should lower the bitrate
+rather than wait for the picture to degrade, and that is just a ConfigSet.
+
+There is deliberately NO server-side congestion control. The server cannot see the
+path between itself and the viewer (the stream crosses a websocket pipe, a worker
+process and often a reverse proxy), so any bandwidth estimate it made would be a
+guess. The client is the only party that knows how fast frames actually arrive.
+
+The client SHOULD adapt on two signals:
+
+  * frames arriving slower than the Hello frame rate, or a growing receive queue,
+    means the path is saturated: step the bitrate DOWN;
+  * a stable queue at the current bitrate for several seconds means there is
+    headroom: step it back UP, but never above the value the user chose.
+
+Every step is a normal ConfigSet, so the server's encoder is rebuilt, an IDR is
+forced and a new Hello is sent exactly as for any other reconfiguration. The
+client must treat the server's Hello as authoritative: an adaptation that the
+server refused (bitrate outside the sane range) must not be retried blindly.
+
 ### Quality presets
 
 The UI offers three named presets, and every platform must map them the same way
