@@ -122,3 +122,44 @@ the downloaded binaries. The same class of bug hit `COPY oem.sh`.
 stalled blob upload and to verify the digest landed), but nothing calls it. Do not
 reach for it when a pull is slow: a slow pull is 18 GB over the public internet,
 not a broken registry.
+
+## Testing a change-driven capture
+
+Screen capture on Windows (WGC) and Android (MediaProjection) emits NOTHING while
+the screen is still. Every e2e script here once reported "no frames" against a
+daemon that was logging send-45-KB on every tick, and the cause was always the
+test, never the daemon.
+
+The three checks live in e2e/ and share pli2.py s reader:
+
+    pli2.py          keyframe request (0x0A) + is there any video at all
+    configset2.py    one geometry change, asserted against the Hello
+    multichange.py   several changes in a row - the only one that catches a
+                     one-shot implementation (Android s projection token is
+                     single-use, so it honoured the FIRST change and nothing
+                     after it)
+
+### The four ways to fake a failure
+
+| Mistake | What it looks like |
+|---|---|
+| recv(2) treated as a complete header | TCP returns one byte; everything after is misaligned |
+| Reading one window, discarding it, waiting for a second | a static desktop never fills the second |
+| Breaking out of the read loop on the first timeout | a quiet gap is normal; everything buffered is thrown away |
+| Never changing the screen | there is nothing to read in the first place |
+
+pli2.py keeps the pointer moving for the whole measurement and analyses ONE
+continuous window with a deadline, not a timeout.
+
+### Read the geometry from the right offset
+
+Android sets flags bit2: offsets 2..6 are the DEVICE size on purpose, so a
+viewer can map pointer coordinates onto device pixels, and the ENCODED size is
+at offset 23. Reading 2..6 everywhere reports the device size on Android and
+makes a correct daemon look wrong. configset2.py geom() handles both layouts.
+
+### Check the daemon, not the log
+
+A daemon that acks and changes nothing looks healthy in every log line it
+writes. Assert on the wire: the Hello after a change must carry the requested
+geometry, and frames must keep arriving at it.
