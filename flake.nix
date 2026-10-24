@@ -15,7 +15,7 @@
             owner = "easydev-org";
             repo = "easystream-webui";
             rev = "ff42ece481464e32a6899ad65d8c1a889cc04ce6";
-            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            hash = "sha256-0ZQwJJVloJNSnllz7oyiQc1tvb+WM3Ob7AABiwQ5SXM=";
           };
         in
         rec {
