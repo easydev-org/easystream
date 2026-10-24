@@ -23,7 +23,7 @@
             pname = "easystream";
             version = "0.1.0";
             src = self;
-            cargoHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            cargoHash = "sha256-P1aARs8jz4veAUp2+e01M8qJsJrQR84RFvYVAn60+a8=";
 
             nativeBuildInputs = with pkgs; [ pkg-config ];
 
