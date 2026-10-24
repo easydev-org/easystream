@@ -12,15 +12,32 @@ p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
 
 
+def geom(hp):
+    """The geometry the ENCODER emits.
+
+    Android sets flags bit2: offsets 2..6 are the DEVICE (input) size on purpose,
+    so a viewer can map pointer coordinates onto device pixels, and the encoded
+    size is carried at offset 23. Every other platform puts the encoded size at
+    2..6. Reading 2..6 everywhere reports the device size on Android and makes a
+    correct daemon look wrong.
+    """
+    inW = (hp[2] << 8) | hp[3]
+    inH = (hp[4] << 8) | hp[5]
+    if len(hp) >= 23 and hp[15] == 1 and (hp[17] & 4) and len(hp) >= 27:
+        return ((hp[23] << 8) | hp[24], (hp[25] << 8) | hp[26], inW, inH)
+    return (inW, inH, inW, inH)
+
+
 def show(tag, hp):
     if not hp or len(hp) < 7:
         print(tag, "no hello"); return
-    w = (hp[2] << 8) | hp[3]; h = (hp[4] << 8) | hp[5]
+    w, h, inW, inH = geom(hp)
     extra = ""
     if len(hp) >= 23 and hp[15] == 1:
         br = (hp[18]<<24)|(hp[19]<<16)|(hp[20]<<8)|hp[21]
         extra = " enc=%d bitrate=%d" % (hp[16], br)
-    print("%s %dx%d fps=%d%s" % (tag, w, h, hp[6], extra))
+    dev = "" if (inW, inH) == (w, h) else " input=%dx%d" % (inW, inH)
+    print("%s %dx%d fps=%d%s%s" % (tag, w, h, hp[6], extra, dev))
 
 
 def main():
@@ -68,8 +85,7 @@ def main():
         print("  (no new Hello - the daemon acked but never re-announced)")
         ok = False
     else:
-        w = (hs[-1][2] << 8) | hs[-1][3]
-        h = (hs[-1][4] << 8) | hs[-1][5]
+        w, h, _iw, _ih = geom(hs[-1])
         if (w, h) != (tw, th):
             print("  (Hello reports %dx%d, asked for %dx%d)" % (w, h, tw, th))
             ok = False
