@@ -97,8 +97,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # --- NixOS build -----------------------------------------------------------
+  #
+  # The Ubuntu-built binary links Ubuntu libs: glibc 2.39 and libx264 ABI 164.
+  # A NixOS guest on nixpkgs-unstable has glibc 2.44 and libx264 ABI 165, so the
+  # Ubuntu binary fails there with
+  #   undefined symbol: x264_encoder_open_164
+  # which no symlink can fix: it is a genuine ABI mismatch. Building the same
+  # source inside nixpkgs produces a binary that resolves against exactly the
+  # libraries the guest has.
+  #
+  # Produces easystream-linux-amd64-nixos, published alongside the Ubuntu ones.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: build
+        run: |
+          set -euo pipefail
+          nix build .#easystream --print-out-paths -L 2>&1 | tee /tmp/nix-build.log
+          cp -L result/bin/easystream /tmp/easystream-linux-amd64-nixos
+          chmod +x /tmp/easystream-linux-amd64-nixos
+          ls -l /tmp/easystream-linux-amd64-nixos
+
+      # Proof that the artifact targets the right ABI: the Ubuntu build shows
+      # x264_encoder_open_164 and glibc 2.39; this one must match nixpkgs.
+      - name: runtime dependencies
+        run: |
+          file /tmp/easystream-linux-amd64-nixos
+          ldd /tmp/easystream-linux-amd64-nixos || true
+          nm -D /tmp/easystream-linux-amd64-nixos 2>/dev/null | grep -o "x264_encoder_open_[0-9]*" | head -2 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nixos
+          path: /tmp/easystream-linux-amd64-nixos
+          if-no-files-found: error
+          retention-days: 7
   release:
-    needs: build
+    needs: [build, nix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
