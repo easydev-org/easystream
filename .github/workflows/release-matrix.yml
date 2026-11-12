@@ -660,8 +660,27 @@ jobs:
           # repository, which is the same reason 15.0 and 15.1 both resolve against
           # `FreeBSD:15` - packages are built per major, and a point release bumps the kernel
           # and userland without rebuilding ports.
-          - { release: "14.1", key: "freebsd-14" }
-          - { release: "15.1", key: "freebsd-15" }
+          # `repo` SAYS WHICH PACKAGE REPOSITORY THIS BUILD MUST RESOLVE AGAINST, and for 14
+          # that is NOT FreeBSD's own.
+          #
+          # IT IS THE SAME ABI AND A DIFFERENT CATALOGUE. GhostBSD 14 is a FreeBSD 14
+          # downstream, so it reports the identical ABI string and `pkg` will happily install
+          # FreeBSD-built packages into it:
+          #
+          #     pkg.freebsd.org/FreeBSD:14:amd64/latest   libx264 0.165.3223_1
+          #     pkg.ghostbsd.org/stable/FreeBSD:14:amd64  libx264 0.164.3095
+          #
+          # But libx264 changes its soname AND its symbol names together, so a binary linked
+          # against 165 asks for `x264_encoder_open_165` and `libx264.so.165`, and neither
+          # exists in the 164 the GhostBSD guest actually has. No symlink bridges that - the
+          # symbol is absent from the library, not just misnamed.
+          #
+          # GhostBSD's catalogue is maintained separately and runs behind FreeBSD's ports tree
+          # (its index was last written 2026-04-18 against FreeBSD's 2026-11-10), which is
+          # exactly why the version differs. A package for a GhostBSD guest has to be built
+          # from the catalogue that guest installs from.
+          - { release: "14.1", key: "freebsd-14", repo: "ghostbsd" }
+          - { release: "15.1", key: "freebsd-15", repo: "freebsd" }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -686,7 +705,41 @@ jobs:
         with:
           release: "${{ matrix.release }}"
           prepare: |
-            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes \
+            # SWITCH THE CATALOGUE BEFORE INSTALLING ANYTHING, FOR THE GHOSTBSD ROW.
+            #
+            # This has to happen FIRST. `pkg install` resolves against whatever is configured,
+            # so a single package installed from FreeBSD's catalogue before the switch pins
+            # this VM to a library version the GhostBSD guest does not have.
+            if [ "${{ matrix.repo }}" = "ghostbsd" ]; then
+              echo "=== switching to the GhostBSD catalogue ==="
+              mkdir -p /usr/local/etc/pkg/repos
+              # THE KEY IS COMMITTED, NOT FETCHED. GhostBSD publishes its repository through
+              # a Storj-backed mirror that serves the packages but no standalone URL for the
+              # signing key, and the key is a public certificate - so it lives in this
+              # repository beside this workflow.
+              mkdir -p /usr/local/share/keys
+              cp "$GITHUB_WORKSPACE/ci/freebsd-repo/ghostbsd.cert" \
+                 /usr/local/share/keys/ghostbsd.cert
+              ls -l /usr/local/share/keys/ghostbsd.cert
+              cat > /usr/local/etc/pkg/repos/GhostBSD.conf <<'CONF'
+            GhostBSD: {
+              url: "https://pkg.ghostbsd.org/stable/FreeBSD:14:amd64/latest",
+              signature_type: "pubkey",
+              pubkey: "/usr/local/share/keys/ghostbsd.cert",
+              enabled: yes
+            }
+            CONF
+              # FreeBSD's own repositories have to go, or the resolver sees two catalogues
+              # offering the same ports at different versions and picks by priority, which is
+              # not a decision this build wants to delegate.
+              for f in /etc/pkg/FreeBSD.conf /usr/local/etc/pkg/repos/FreeBSD.conf; do
+                [ -f "$f" ] && sed -i 's/enabled: yes/enabled: no/' "$f" || true
+              done
+              pkg update -f
+              echo "=== the catalogue this build will resolve against ==="
+              pkg rquery '%n %v' 2>/dev/null | grep -E '^libx264 ' || echo "  libx264 NOT FOUND"
+            fi
+            pkg install -y rust pkgconf gmake libx264 libxcb libX11 libXtst libXfixes \
                            opus dbus at-spi2-core libyuv bash
           run: |
             set -eux
@@ -707,6 +760,28 @@ jobs:
               printf "  %s: " "$so"
               nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
             done
+            # THE TWO MUST AGREE, AND A MISMATCH IS A FAILED BUILD EVEN THOUGH IT LINKS.
+            #
+            # Every guest this package targets installs ITS OWN libx264, and the linker's
+            # choice is invisible here because it resolves against whatever this VM happens
+            # to have. The mismatch only appears when the package runs somewhere else, as
+            #
+            #     ld-elf.so.1: Shared object "libx264.so.165" not found
+            #
+            # so it is asserted at build time, against the version this row is supposed to
+            # resolve against.
+            if [ "${{ matrix.repo }}" = "ghostbsd" ]; then
+              want=164
+            else
+              want=165
+            fi
+            have=$(nm -D target/release/easystream 2>/dev/null \
+                   | grep -m1 -oE 'x264_encoder_open_[0-9]+' | grep -oE '[0-9]+$' || echo "")
+            echo "=== this build must ask for ABI $want, it asks for ${have:-nothing} ==="
+            if [ "$have" != "$want" ]; then
+              echo "=== WRONG libx264 ABI: the package would not run on its target ===" >&2
+              exit 1
+            fi
             # THE PACKAGE IS BUILT HERE, INSIDE THE VM, because `pkg create` and
             # `pkg config abi` are the tools that know what a .pkg for this system is.
             sh ci/package-freebsd.sh "${GITHUB_REF_NAME:-0.0.0}"
