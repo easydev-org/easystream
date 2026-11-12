@@ -464,9 +464,33 @@ jobs:
     container:
       image: opensuse/leap:16.0
     steps:
-      # git only; the steps below are POSIX sh (see the note in the apt job).
-      - name: git before checkout
-        run: zypper --non-interactive install ca-certificates git curl
+      # GIT, PLUS THREE THINGS THE RUNNER AND THIS IMAGE DISAGREE ABOUT.
+      #
+      # bash        opensuse/leap:16.0 ships no bash at all. `dtolnay/rust-toolchain` is a
+      #             composite action whose every run step is `shell: bash`, so without it the
+      #             job dies before the toolchain step does anything useful:
+      #
+      #                 OCI runtime exec failed: exec: "bash": executable file not found in $PATH
+      #
+      #             and build-webui.sh has a bash shebang too.
+      #
+      # curl        the toolchain action's installer pipes sh.rustup.rs into a shell.
+      # ca-certificates  without it that curl fails verification, which reads as a network
+      #             problem.
+      - name: git and a shell before checkout
+        run: zypper --non-interactive install ca-certificates git curl bash
+
+      # THE TOOLCHAIN ACTION RUNS AS ROOT WITH HOME=/github/home ON A CONTAINER JOB, and
+      # rustup refuses that combination:
+      #
+      #     error: $HOME differs from euid-obtained home directory: you may be using sudo
+      #     error: $HOME directory: /github/home
+      #     error: euid-obtained home directory: /root
+      #     info: skipping toolchain installation
+      #
+      # "skipping toolchain installation" IS THE FAILURE - it exits zero having installed
+      # nothing, and the next step says cargo is missing. Pointing HOME at the directory
+      # rustup derives from /etc/passwd makes the two agree.
 
       - uses: actions/checkout@v4
 
@@ -537,6 +561,8 @@ jobs:
           done
 
       - uses: dtolnay/rust-toolchain@stable
+        env:
+          HOME: /root
 
       - uses: Swatinem/rust-cache@v2
         with:
