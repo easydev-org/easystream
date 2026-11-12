@@ -98,24 +98,22 @@ jobs:
       #     git: command not found                 (the checkout itself)
       #
       # The order below is the fix: package manager first, repository second.
-      # GIT AND BASH, BOTH BEFORE ANYTHING ELSE.
+      # GIT FIRST: actions/checkout runs it, and the bare ubuntu:26.04 / debian:13 images
+      # do not ship it.
       #
-      # git: actions/checkout runs it, and the bare ubuntu:26.04 / debian:13 images do not
-      # ship it.
-      #
-      # bash: every `run:` in this workflow that uses `set -o pipefail` declares
-      # `shell: bash`, because GitHub's default inside a container is `sh -e {0}` and dash
-      # (the /bin/sh of both Ubuntu and Debian) answers
+      # NO BASH ON PURPOSE. Every `run:` block here is POSIX sh: `set -eu` and nothing more.
+      # An earlier version used `set -euo pipefail`, which is a bash extension, and on
+      # Ubuntu and Debian - whose /bin/sh is dash - the first line of the step died with
       #
       #     set: Illegal option -o pipefail
       #
-      # and exits 2 before the first line of the step. Fedora and Arch passed only because
-      # their /bin/sh is bash already - which is exactly the kind of per-base difference
-      # this workflow exists to surface, just not one worth relying on.
-      - name: git and bash, before anything else
+      # before cargo was reached. `pipefail` was not buying anything: every pipeline in this
+      # file ends in `|| true` or `|| echo ...`, so the exit status it guards is already
+      # handled explicitly. `-e` and `-u` are POSIX and are the two that matter.
+      - name: git, before anything else
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git bash
+          apt-get install -y --no-install-recommends ca-certificates curl git
 
       - uses: actions/checkout@v4
 
@@ -146,7 +144,7 @@ jobs:
 
       - name: build
         run: |
-          set -euo pipefail
+          set -eu
           cargo build --release
           out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
@@ -156,11 +154,10 @@ jobs:
       # THE VERDICT IS IN THESE LINES, and they are what a future reader needs: which x264
       # ABI this binary asks for, which this base provides, and the glibc floor it imposes.
       # A green build that prints a mismatch is a build that will fail in a guest.
-        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
-          set -euo pipefail
+          set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== the ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
@@ -179,7 +176,6 @@ jobs:
           ldd --version 2>&1 | head -1
           echo "=== ldd ==="
           ldd "$out" 2>&1 | head -14 || true
-        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -209,7 +205,7 @@ jobs:
       # keyring are what a container needs before it can verify anything over TLS.
       - name: keyring before anything over TLS
         run: |
-          pacman -Sy --noconfirm --needed archlinux-keyring ca-certificates git bash
+          pacman -Sy --noconfirm --needed archlinux-keyring ca-certificates git
 
       - uses: actions/checkout@v4
 
@@ -235,17 +231,16 @@ jobs:
 
       - name: build
         run: |
-          set -euo pipefail
+          set -eu
           cargo build --release
           out=easystream-linux-amd64-arch
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
-        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
-          set -euo pipefail
+          set -eu
           out=/tmp/easystream-linux-amd64-arch
           echo "=== the ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
@@ -258,7 +253,6 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
-        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -291,7 +285,7 @@ jobs:
     steps:
       - name: git and the keyring, before checkout
         run: |
-          dnf install -y ca-certificates git curl bash
+          dnf install -y ca-certificates git curl
 
       - uses: actions/checkout@v4
 
@@ -324,17 +318,16 @@ jobs:
 
       - name: build
         run: |
-          set -euo pipefail
+          set -eu
           cargo build --release
           out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
-        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
-          set -euo pipefail
+          set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
@@ -347,7 +340,6 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
-        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -381,16 +373,15 @@ jobs:
     container:
       image: opensuse/leap:16.1
     steps:
-      # bash too: the steps below declare `shell: bash` for `set -o pipefail`, and
-      # opensuse/leap does not guarantee bash is present.
-      - name: git and bash before checkout
-        run: zypper --non-interactive install ca-certificates git curl bash
+      # git only; the steps below are POSIX sh (see the note in the apt job).
+      - name: git before checkout
+        run: zypper --non-interactive install ca-certificates git curl
 
       - uses: actions/checkout@v4
 
       - name: Packman, because x264 is not in Leap's OSS repo
         run: |
-          set -euo pipefail
+          set -eu
           . /etc/os-release
           echo "this base: $PRETTY_NAME"
           for repo in "openSUSE_Leap_${VERSION_ID}" "openSUSE_Leap_${VERSION_ID%%.*}"; do
@@ -407,11 +398,10 @@ jobs:
           done
           echo "=== packman has no repository for $VERSION_ID; trying the OSS repo alone ==="
           zypper --non-interactive refresh
-        shell: bash
 
       - name: libraries
         run: |
-          set -euo pipefail
+          set -eu
           zypper --non-interactive install \
             gcc gcc-c++ make pkg-config \
             dbus-1-devel opus-devel \
@@ -422,7 +412,6 @@ jobs:
             libx264-devel libyuv-devel || true
           echo "=== what this base provides ==="
           rpm -qa 2>/dev/null | grep -iE '^(libx264|libyuv|opus|pipewire)' | sort || true
-        shell: bash
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -435,17 +424,16 @@ jobs:
 
       - name: build
         run: |
-          set -euo pipefail
+          set -eu
           cargo build --release
           out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
-        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
-          set -euo pipefail
+          set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
@@ -458,7 +446,6 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
-        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -473,32 +460,52 @@ jobs:
   # for the same reason release.yml builds arm64 on a native arm64 runner: a cross build
   # cannot run its own tests, and the C shims must link FreeBSD's libxcb, not a Linux one.
   freebsd:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: freebsd-15.0
+            release: "15.0"
+          - name: freebsd-15.1
+            release: "15.1"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: build on FreeBSD
+      # ONE BUILD PER FREEBSD RELEASE, for the same reason there is one per Linux base:
+      # a binary links the libx264 built by that release's ports tree. FreeBSD 15.0 and
+      # 15.1 ship different ports revisions, and a binary built on 15.1 may reference a
+      # symbol 15.0's libx264 does not carry. `release:` names the VM image, and the
+      # action fetches the newest matching one.
+      - name: build on FreeBSD ${{ matrix.release }}
         uses: vmactions/freebsd-vm@v1
         with:
-          usesh: true
+          release: ${{ matrix.release }}
           prepare: |
-            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes \
-                           opus dbus at-spi2-core libyuv bash
+            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes                            opus dbus at-spi2-core libyuv bash
           run: |
-            set -e
+            set -eux
+            freebsd-version
+            # build-webui.sh is the one script here with a bash shebang; everything this
+            # workflow adds is POSIX sh.
             bash build-webui.sh
             sh ci/patch-freebsd.sh
             cargo build --release
-            cp target/release/easystream /tmp/easystream-linux-amd64-freebsd
-            ls -l /tmp/easystream-linux-amd64-freebsd
-            echo "=== what it links ==="
-            nm -D /tmp/easystream-linux-amd64-freebsd 2>/dev/null \
-              | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+            cp target/release/easystream /tmp/easystream-linux-amd64-${{ matrix.name }}
+            ls -l /tmp/easystream-linux-amd64-${{ matrix.name }}
+            echo "=== the ABI this binary ASKS FOR ==="
+            nm -D /tmp/easystream-linux-amd64-${{ matrix.name }} 2>/dev/null               | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+            echo "=== the ABI this release PROVIDES ==="
+            for so in /usr/local/lib/libx264.so.*; do
+              [ -e "$so" ] || continue
+              printf "  %s: " "$so"
+              nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+            done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: freebsd
-          path: /tmp/easystream-linux-amd64-freebsd
+          name: freebsd-${{ matrix.name }}
+          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
           if-no-files-found: error
           retention-days: 7
 
