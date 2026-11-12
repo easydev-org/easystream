@@ -679,7 +679,31 @@ jobs:
           # (its index was last written 2026-04-18 against FreeBSD's 2026-11-10), which is
           # exactly why the version differs. A package for a GhostBSD guest has to be built
           # from the catalogue that guest installs from.
-          - { release: "14.1", key: "freebsd-14", repo: "ghostbsd" }
+          # 14.4, NOT 14.1, AND THE PACKAGE INDEX IS WHY.
+          #
+          # `pkg` refuses a package whose declared FreeBSD_version is newer than the running
+          # system, and the two catalogues were built at different points in the 14 branch:
+          #
+          #     GhostBSD libx264   annotations.FreeBSD_version = 1403000   (14.3)
+          #     FreeBSD libx264    annotations.FreeBSD_version = 1404000   (14.4)
+          #
+          # and the kernel of each release reports:
+          #
+          #     releng/14.1 -> __FreeBSD_version 1401000
+          #     releng/14.3 -> __FreeBSD_version 1403000
+          #     releng/14.4 -> __FreeBSD_version 1404000
+          #
+          # A 14.1 VM is therefore TOO OLD for the GhostBSD catalogue:
+          #
+          #     pkg: repository GhostBSD contains packages for wrong OS version: FreeBSD:14:amd64
+          #     Unable to update repository GhostBSD
+          #
+          # `IGNORE_OSVERSION=yes` would silence that check, and is the wrong answer: it also
+          # disables the guard that stops a package built for a NEWER kernel being installed on
+          # an older one. Bumping the VM to 14.4 satisfies the check instead of skipping it, and
+          # the resulting package declares ABI `FreeBSD:14:amd64` like every other 14.x guest,
+          # which is what a published artifact should say.
+          - { release: "14.4", key: "freebsd-14", repo: "ghostbsd" }
           - { release: "15.1", key: "freebsd-15", repo: "freebsd" }
     runs-on: ubuntu-latest
     steps:
@@ -733,8 +757,11 @@ jobs:
               # offering the same ports at different versions and picks by priority, which is
               # not a decision this build wants to delegate.
               for f in /etc/pkg/FreeBSD.conf /usr/local/etc/pkg/repos/FreeBSD.conf; do
-                [ -f "$f" ] && sed -i 's/enabled: yes/enabled: no/' "$f" || true
-              done
+                # `-[[:space:]]*` absorbs the spacing variants; pkg accepts both `enabled:yes` and
+                # `enabled: yes`, and a sed that only matches one of them leaves the other
+                # catalogue enabled - which is the failure this block exists to prevent.
+                [ -f "$f" ] && sed -i -E 's/(enabled)[[:space:]]*:[[:space:]]*yes/\1: no/' "$f" || true
+                done
               pkg update -f
               echo "=== the catalogue this build will resolve against ==="
               pkg rquery '%n %v' 2>/dev/null | grep -E '^libx264 ' || echo "  libx264 NOT FOUND"
