@@ -474,7 +474,7 @@ jobs:
       # PLACE AS EACH OTHER. Measured against the repositories themselves:
       #
       #   x264      Packman Essentials   libx264-165-20250608.b35605ac, libx264-devel
-      #   libyuv    OBS multimedia:libs  libyuv-devel-20230517+a377993-lp161
+      #   libyuv    OBS multimedia:libs  libyuv-devel-20230517+a377993-lp160
       #
       # Leap's own OSS repo has neither - its x264 is inside ffmpeg-4 and not exposed as a
       # library, and `libsharpyuv0` is WebP's, not libyuv.
@@ -491,8 +491,25 @@ jobs:
 
           zypper --non-interactive addrepo --refresh --priority 90 \
             "https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Leap_${VERSION_ID}/Essentials/" packman
+          # NO /x86_64/ ON THIS URL, AND THAT IS NOT OMISSION.
+          #
+          # OBS publishes two shapes. A per-architecture repository has its repodata under
+          # `<project>/<arch>/repodata/`; a FLAT one has repodata at the project root and the
+          # RPMs in per-architecture SUBDIRECTORIES beside it. multimedia:libs/16.0 is the
+          # second kind, and the primary metadata proves it:
+          #
+          #     location href="x86_64/libyuv0-20230517+a377993-lp160.20.4.x86_64.rpm"
+          #     location href="noarch/AMF-devel-1.5.3-lp160.20.1.noarch.rpm"
+          #
+          # So the URL with /x86_64/ appended returns 404 for repomd.xml and zypper reports
+          #
+          #     Retrieving repository 'multimedia-libs' metadata [.error]
+          #     Skipping repository 'multimedia-libs' because of the above error.
+          #
+          # and then `zypper install --from multimedia-libs libyuv-devel` fails with the package
+          # not found - a message about libyuv, for a mistake about a URL.
           zypper --non-interactive addrepo --refresh --priority 91 \
-            "https://download.opensuse.org/repositories/multimedia:/libs/${VERSION_ID}/x86_64/" multimedia-libs
+            "https://download.opensuse.org/repositories/multimedia:/libs/${VERSION_ID}/" multimedia-libs
 
           zypper --non-interactive --gpg-auto-import-keys refresh
 
