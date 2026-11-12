@@ -98,10 +98,24 @@ jobs:
       #     git: command not found                 (the checkout itself)
       #
       # The order below is the fix: package manager first, repository second.
-      - name: git, so checkout can run at all
+      # GIT AND BASH, BOTH BEFORE ANYTHING ELSE.
+      #
+      # git: actions/checkout runs it, and the bare ubuntu:26.04 / debian:13 images do not
+      # ship it.
+      #
+      # bash: every `run:` in this workflow that uses `set -o pipefail` declares
+      # `shell: bash`, because GitHub's default inside a container is `sh -e {0}` and dash
+      # (the /bin/sh of both Ubuntu and Debian) answers
+      #
+      #     set: Illegal option -o pipefail
+      #
+      # and exits 2 before the first line of the step. Fedora and Arch passed only because
+      # their /bin/sh is bash already - which is exactly the kind of per-base difference
+      # this workflow exists to surface, just not one worth relying on.
+      - name: git and bash, before anything else
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git
+          apt-get install -y --no-install-recommends ca-certificates curl git bash
 
       - uses: actions/checkout@v4
 
@@ -142,6 +156,8 @@ jobs:
       # THE VERDICT IS IN THESE LINES, and they are what a future reader needs: which x264
       # ABI this binary asks for, which this base provides, and the glibc floor it imposes.
       # A green build that prints a mismatch is a build that will fail in a guest.
+        shell: bash
+
       - name: what this binary links, and what this base provides
         run: |
           set -euo pipefail
@@ -163,6 +179,7 @@ jobs:
           ldd --version 2>&1 | head -1
           echo "=== ldd ==="
           ldd "$out" 2>&1 | head -14 || true
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -192,7 +209,7 @@ jobs:
       # keyring are what a container needs before it can verify anything over TLS.
       - name: keyring before anything over TLS
         run: |
-          pacman -Sy --noconfirm --needed archlinux-keyring ca-certificates git
+          pacman -Sy --noconfirm --needed archlinux-keyring ca-certificates git bash
 
       - uses: actions/checkout@v4
 
@@ -224,6 +241,7 @@ jobs:
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
+        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
@@ -240,6 +258,7 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -272,7 +291,7 @@ jobs:
     steps:
       - name: git and the keyring, before checkout
         run: |
-          dnf install -y ca-certificates git curl
+          dnf install -y ca-certificates git curl bash
 
       - uses: actions/checkout@v4
 
@@ -311,6 +330,7 @@ jobs:
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
+        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
@@ -327,6 +347,7 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
@@ -360,8 +381,10 @@ jobs:
     container:
       image: opensuse/leap:16.1
     steps:
-      - name: git before checkout
-        run: zypper --non-interactive install ca-certificates git curl
+      # bash too: the steps below declare `shell: bash` for `set -o pipefail`, and
+      # opensuse/leap does not guarantee bash is present.
+      - name: git and bash before checkout
+        run: zypper --non-interactive install ca-certificates git curl bash
 
       - uses: actions/checkout@v4
 
@@ -384,6 +407,7 @@ jobs:
           done
           echo "=== packman has no repository for $VERSION_ID; trying the OSS repo alone ==="
           zypper --non-interactive refresh
+        shell: bash
 
       - name: libraries
         run: |
@@ -398,6 +422,7 @@ jobs:
             libx264-devel libyuv-devel || true
           echo "=== what this base provides ==="
           rpm -qa 2>/dev/null | grep -iE '^(libx264|libyuv|opus|pipewire)' | sort || true
+        shell: bash
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -416,6 +441,7 @@ jobs:
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
+        shell: bash
 
       - name: what this binary links, and what this base provides
         run: |
@@ -432,6 +458,7 @@ jobs:
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           ldd "$out" 2>&1 | head -12 || true
+        shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
