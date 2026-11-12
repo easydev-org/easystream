@@ -9,11 +9,20 @@
 # script cannot be reused: a .pkg is a tar with a +MANIFEST and a +COMPACT_MANIFEST, and
 # `pkg create` is the tool the system already has.
 #
-# THE DEPENDENCY NAMES ARE THE PORTS, NOT THE PACKAGE NAMES ON DISK. `pkg install libx264`
-# does not exist; the port that provides libx264.so is `x264`. Same for the X libraries:
-# libxcb is one port that installs all five shared objects this binary links. Getting these
-# wrong does not fail the build - `pkg create` writes whatever it is told - it fails on the
-# user's machine at install time, which is far worse.
+# THE FIRST VERSION PRODUCED A 655-BYTE PACKAGE THAT CONTAINED ONLY THE MANIFEST, and this is
+# why, because the command looked right:
+#
+#     pkg create -M "$ROOT/+MANIFEST" -r "$ROOT" -o dist
+#
+# `-r rootdir` tells pkg-create where the files ARE; it does not tell it WHICH files to
+# package. With `-M` and no `-p plist` there is nothing to select from, so it wrote the
+# metadata and no payload - and reported success, so the job was green and the artifact was
+# empty. The plist is not optional for this mode: it is the file list.
+#
+# DEPENDENCY NAMES ARE PORTS, NOT LIBRARIES. `pkg install libx264` does not exist; the port
+# that installs libx264.so is `x264`. Same for dbus (the port is `dbus`) and libxcb (one port
+# installing five shared objects). `pkg create` writes whatever it is told without checking,
+# so a wrong name here fails on the user's machine at install time.
 set -eu
 
 VERSION=${1:-${GITHUB_REF_NAME:-0.0.0}}
@@ -24,19 +33,11 @@ BIN=target/release/easystream
 
 ROOT=$(pwd)/pkgroot
 rm -rf "$ROOT"
-mkdir -p "$ROOT/usr/local/bin" "$ROOT/usr/local/share/man/man1" \
-         "$ROOT/usr/local/lib/systemd/user" "$ROOT/usr/local/etc"
+mkdir -p "$ROOT/usr/local/bin" "$ROOT/usr/local/share/man/man1" "$ROOT/usr/local/etc"
 
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/easystream"
 install -m 0644 packaging/easystream.1 "$ROOT/usr/local/share/man/man1/easystream.1"
-install -m 0644 packaging/easystream.service \
-    "$ROOT/usr/local/lib/systemd/user/easystream.service"
 
-# THE POST-INSTALL SCRIPT, RUN FROM THE PACKAGE'S OWN PREFIX.
-#
-# The Linux script only calls `ldconfig`-equivalents that do not exist here, and the service
-# is a user unit in a path FreeBSD does not have. These two lines are the whole of it: pkg
-# needs nothing else, and a FreeBSD user enables the daemon the same way a Linux user does.
 cat > "$ROOT/usr/local/etc/easystream-pkg-note" <<'NOTE'
 easystream is a per-session daemon. It is not a system service and is not started at boot.
 
@@ -47,11 +48,21 @@ The daemon needs the session's D-Bus for AT-SPI, and the session's DISPLAY for c
 must run as the logged-in user rather than from /etc/rc.conf.
 NOTE
 
-# +MANIFEST. `pkg create -M` reads exactly this file, and every key below is required except
-# the ones FreeBSD's own portsleave out deliberately.
+# THE FILE LIST, IN THE LEGACY plist FORMAT.
+#
+# Paths are ABSOLUTE and relative to the running system, and `-r` is what makes them resolve
+# inside the staging tree instead. Directories are listed without a trailing slash; a leading
+# @ means a metadata directive (@dir for an empty directory, @mode for permissions).
+cat > /tmp/easystream-plist <<'PLIST'
+/usr/local/bin/easystream
+/usr/local/share/man/man1/easystream.1
+/usr/local/etc/easystream-pkg-note
+PLIST
+
+# +MANIFEST. `pkg create -M` reads exactly this file.
 #
 # `arch` is the ABI string from `pkg config abi`, not `amd64`: a package claiming the wrong
-# ABI is refused with "wrong architecture" and the message names neither the package's claim
+# ABI is refused with "wrong architecture", a message that names neither the package's claim
 # nor the system's.
 ABI=$(pkg config abi)
 cat > "$ROOT/+MANIFEST" <<MANIFEST
@@ -74,14 +85,6 @@ licenselogic: single
 licenses: [MIT]
 
 # THE PORTS THESE SHARED OBJECTS COME FROM, WHICH IS NOT ALWAYS THE LIBRARY'S NAME.
-#
-#   x264      installs libx264.so.NN      - the port is `x264`
-#   libyuv    installs libyuv.so          - port name is the same
-#   opus      installs libopus.so.NN      - the port is `opus`
-#   libxcb    installs libxcb.so plus xcb-xtest/-shm/-xfixes/-render
-#   libX11    installs libX11.so
-#   dbus      installs libdbus-1.so       - the port is `dbus`, not `dbus-libs`
-#   at-spi2-core  provides the D-Bus accessibility bus, not a link dependency
 deps: {
     x264: {origin: "multimedia/libx264", version: "0"},
     libyuv: {origin: "graphics/libyuv", version: "0"},
@@ -93,19 +96,32 @@ deps: {
 }
 MANIFEST
 
-# +COMPACT_MANIFEST is the small one `pkg` reads first; `pkg create` derives it from
-# +MANIFEST when -M is used, so there is nothing to write here.
 mkdir -p dist
-# -o is the output DIRECTORY, and the filename comes from `name` and `version` above.
-pkg create -M "$ROOT/+MANIFEST" -r "$ROOT" -o dist --quiet
+# -M manifest, -r staging root, -p file list. All three are required for this mode.
+pkg create -M "$ROOT/+MANIFEST" -r "$ROOT" -p /tmp/easystream-plist -o dist --quiet
 
 echo "=== packaged ==="
 ls -l dist/
-# THE MANIFEST AS pkg SEES IT, which is the only way to prove the dependencies landed.
-echo "=== what the package declares ==="
-for f in dist/easystream-*.pkg; do
-    [ -e "$f" ] || continue
-    pkg info -lF "$f" 2>/dev/null | head -8
-    echo "  --- deps ---"
-    pkg query -F "$f" '%dn-%dv' 2>/dev/null | head -10
-done
+
+# A PACKAGE THAT CONTAINS ONLY A MANIFEST IS A FAILED BUILD, NOT A SMALL ONE.
+#
+# The first version of this script produced 655 bytes and every step reported success. A
+# size check is crude but it is the difference between noticing in CI and noticing when a
+# user runs `pkg install` and gets a daemon that is not there.
+PKG=$(ls dist/easystream-*.pkg 2>/dev/null | head -1)
+if [ -z "$PKG" ]; then
+    echo "=== NO PACKAGE WAS WRITTEN ===" >&2
+    exit 1
+fi
+SIZE=$(stat -f %z "$PKG" 2>/dev/null || stat -c %s "$PKG")
+echo "=== $PKG is $SIZE bytes ==="
+if [ "$SIZE" -lt 100000 ]; then
+    echo "=== THE PACKAGE IS TOO SMALL TO CONTAIN THE BINARY ===" >&2
+    pkg info -lF "$PKG" 2>/dev/null | head -10
+    exit 1
+fi
+
+echo "=== what the package contains ==="
+pkg info -lF "$PKG" 2>/dev/null | head -10
+echo "=== what it depends on ==="
+pkg query -F "$PKG" '%dn-%dv' 2>/dev/null | head -10
