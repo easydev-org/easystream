@@ -85,7 +85,7 @@ jobs:
     steps:
       - name: the base this binary will be FOR
         run: |
-          cat /etc/os-release | head -3
+          grep -m3 . /etc/os-release
           echo "---"
 
       # GIT BEFORE CHECKOUT, AND THIS IS NOT OPTIONAL.
@@ -160,22 +160,22 @@ jobs:
           set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== the ABI this binary ASKS FOR ==="
-          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== the ABI this base PROVIDES ==="
           found=0
           for so in /usr/lib/x86_64-linux-gnu/libx264.so.* /usr/lib/libx264.so.*; do
             [ -e "$so" ] || continue
             found=1
             printf "  %s: " "$so"
-            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
           done
           [ "$found" = 1 ] || echo "  (libx264 shared object not found)"
           echo "=== glibc floor this binary imposes ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
           echo "=== its own glibc ==="
-          ldd --version 2>&1 | head -1
+          ldd --version 2>&1 | grep -m1 .
           echo "=== ldd ==="
-          ldd "$out" 2>&1 | head -14 || true
+          ldd "$out" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -243,16 +243,16 @@ jobs:
           set -eu
           out=/tmp/easystream-linux-amd64-arch
           echo "=== the ABI this binary ASKS FOR ==="
-          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== the ABI this base PROVIDES ==="
           for so in /usr/lib/libx264.so.*; do
             [ -e "$so" ] || continue
             printf "  %s: " "$so"
-            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
           done
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
-          ldd "$out" 2>&1 | head -12 || true
+          ldd "$out" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -330,16 +330,16 @@ jobs:
           set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
-          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
           for so in /usr/lib64/libx264.so.*; do
             [ -e "$so" ] || continue
             printf "  %s: " "$so"
-            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
           done
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
-          ldd "$out" 2>&1 | head -12 || true
+          ldd "$out" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -436,16 +436,16 @@ jobs:
           set -eu
           out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
-          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
           for so in /usr/lib64/libx264.so.*; do
             [ -e "$so" ] || continue
             printf "  %s: " "$so"
-            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
           done
           echo "=== glibc floor ==="
           objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
-          ldd "$out" 2>&1 | head -12 || true
+          ldd "$out" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -494,12 +494,13 @@ jobs:
             cp target/release/easystream /tmp/easystream-linux-amd64-${{ matrix.name }}
             ls -l /tmp/easystream-linux-amd64-${{ matrix.name }}
             echo "=== the ABI this binary ASKS FOR ==="
-            nm -D /tmp/easystream-linux-amd64-${{ matrix.name }} 2>/dev/null               | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+            nm -D "/tmp/easystream-linux-amd64-${{ matrix.name }}" 2>/dev/null \
+              | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
             echo "=== the ABI this release PROVIDES ==="
             for so in /usr/local/lib/libx264.so.*; do
               [ -e "$so" ] || continue
               printf "  %s: " "$so"
-              nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+              nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
             done
 
       - uses: actions/upload-artifact@v4
@@ -532,7 +533,7 @@ jobs:
           ls -l /tmp/assets
           echo "--- one line per asset ---"
           for f in /tmp/assets/easystream-*; do
-            abi=$(nm -D "$f" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || true)
+            abi=$(nm -D "$f" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || true)
             printf "%-46s %s\n" "$(basename "$f")" "${abi:-static/none}"
           done
 
