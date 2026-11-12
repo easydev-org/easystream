@@ -137,7 +137,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: leap-16.1
+          key: ${{ matrix.name }}
 
       - name: fetch the shared web UI
         run: bash build-webui.sh
@@ -155,7 +155,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -eu
-          out=/tmp/easystream-linux-amd64-leap-16.1
+          out=target/release/easystream
           echo "=== the ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== the ABI this base PROVIDES ==="
@@ -235,7 +235,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -eu
-          out=/tmp/easystream-linux-amd64-arch
+          out=target/release/easystream
           echo "=== the ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== the ABI this base PROVIDES ==="
@@ -322,7 +322,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -eu
-          out=/tmp/easystream-linux-amd64-manjaro
+          out=target/release/easystream
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
@@ -406,7 +406,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -eu
-          out=/tmp/easystream-linux-amd64-leap-16.1
+          out=target/release/easystream
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
@@ -426,16 +426,29 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # --- openSUSE Leap 16.1 ----------------------------------------------------
+  # --- openSUSE Leap 16.0 ----------------------------------------------------
   #
   # ONE VERSION, AND THE DOCKER IMAGE IS THE ONLY THING THAT MATTERS HERE.
   #
-  # This job builds easystream against the libraries openSUSE Leap 16.1 ships. Whether a
+  # This job builds easystream against the libraries openSUSE Leap 16.0 ships. Whether a
   # Leap ISO also exists is a different question and not this one - the input is
-  # `opensuse/leap:16.1` and the output is a binary that resolves against what is inside it.
+  # `opensuse/leap:16.0` and the output is a package that resolves against what is inside it.
   #
-  # 16.0 IS NOT BUILT. One Leap release is enough to establish what its library set looks
-  # like, and the point-release that is actually current is the one worth carrying.
+  # 16.1, NOT 16.0, WOULD BE THE CURRENT POINT RELEASE - AND IT CANNOT BE BUILT YET.
+  #
+  # libyuv is not in Leap's OSS repository; it comes from OBS `multimedia:libs`. That
+  # project has a complete repository for 16.0 and none for 16.1:
+  #
+  #     multimedia:/libs/16.0/repodata/repomd.xml   200   6462 packages, libyuv0 present
+  #     multimedia:/libs/16.1/repodata/repomd.xml   404   the directory exists, repodata does not
+  #
+  # and the project's own page has two open requests asking for it:
+  #
+  #     "Please enable building against Leap 16.1 for this project"
+  #     "Please enable 16.1"
+  #
+  # So 16.0 is the release whose library set can actually be satisfied today. When those
+  # requests land, this row moves to 16.1 and nothing else changes.
   #
   # X264 IS IN PACKMAN. Leap's own OSS repository does not carry it (same patent reason as
   # Fedora), so the Packman repository is added first. `--gpg-auto-import-keys` is used
@@ -449,7 +462,7 @@ jobs:
   leap:
     runs-on: ubuntu-latest
     container:
-      image: opensuse/leap:16.1
+      image: opensuse/leap:16.0
     steps:
       # git only; the steps below are POSIX sh (see the note in the apt job).
       - name: git before checkout
@@ -510,7 +523,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: leap-16.1
+          key: leap-16.0
 
       - name: fetch the shared web UI
         run: bash build-webui.sh
@@ -519,7 +532,7 @@ jobs:
         run: |
           set -eu
           cargo build --release
-          sh ci/package.sh "leap-16.1" "${GITHUB_REF_NAME:-0.0.0}"
+          sh ci/package.sh "leap-16.0" "${GITHUB_REF_NAME:-0.0.0}"
 
       - name: what this binary links, and what this base provides
         run: |
@@ -539,7 +552,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: packages-leap-16.1
+          name: packages-leap-16.0
           path: dist/*
           if-no-files-found: error
           retention-days: 7

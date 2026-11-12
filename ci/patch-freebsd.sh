@@ -225,6 +225,12 @@ else
     grep -q '#include <fcntl.h>' src/x11shim.c || \
       sed -i.bak 's|#include <sys/mman.h>|#include <sys/mman.h>\n#include <fcntl.h>|' src/x11shim.c
 
+    # `awk -v` CANNOT CARRY A MULTILINE VALUE, and that is what failed on the first run:
+    #
+    #     awk: newline in string #if defined(__FreeBS... at source line 1
+    #
+    # So the replacement is written to a file and read with `getline` from BEGIN, which has
+    # no such restriction, and the line is replaced by printing the file's contents.
     cat > /tmp/x11shim_patch.txt <<'PATCH'
 #if defined(__FreeBSD__)
     // FREBSD HAS memfd_create(2) SINCE 13.0 BUT NO GLIBC-STYLE DECLARATION in sys/mman.h.
@@ -235,9 +241,12 @@ else
     int fd = memfd_create("xshm", MFD_CLOEXEC);
 #endif
 PATCH
-    # Use awk to replace the single line with the multi-line block.
-    awk -v patch="$(cat /tmp/x11shim_patch.txt)" '
-      /int fd = memfd_create\("xshm", MFD_CLOEXEC\);/ { print patch; next }
+    awk -v patchfile=/tmp/x11shim_patch.txt '
+      BEGIN {
+        while ((getline line < patchfile) > 0) patch = patch line "\n"
+        close(patchfile)
+      }
+      /int fd = memfd_create\("xshm", MFD_CLOEXEC\);/ { printf "%s", patch; next }
       { print }
     ' src/x11shim.c > src/x11shim.c.new
     mv src/x11shim.c.new src/x11shim.c
