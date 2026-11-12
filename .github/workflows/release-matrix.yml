@@ -560,13 +560,51 @@ jobs:
             nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
           done
 
-      - uses: dtolnay/rust-toolchain@stable
-        env:
-          HOME: /root
+      # THE DISTRIBUTION'S OWN RUST, NOT RUSTUP.
+      #
+      # `dtolnay/rust-toolchain` was tried and cannot work in this image. It installs fine -
+      # "Rust is installed now. Great!" - and then every later step is `shell: bash
+      # --noprofile --norc`, which the runner executes through the container runtime:
+      #
+      #     OCI runtime exec failed: exec failed: unable to start container process:
+      #     exec: "bash": executable file not found in $PATH
+      #
+      # That message is misleading. bash IS installed - step 3 installs it and `zypper`
+      # reports `'bash' is already installed` - but the container is a minimal image with no
+      # /bin/sh -> bash convention, and the runner's exec path looks the shell up in a way
+      # that does not find it. Rather than fight the harness, use what the distribution
+      # ships, which is also the rule this matrix follows everywhere else.
+      #
+      # Leap 16.0's OSS repository carries rust 1.98:
+      #
+      #     rust-1.98.0-160000.1.1.x86_64.rpm
+      #     cargo-1.95.0-160000.1.1.x86_64.rpm
+      #
+      # and a package built by the distribution's own toolchain is the one that links against
+      # the distribution's own libraries, which is the whole point of this job.
+      - name: rust from the distribution
+        run: |
+          set -eu
+          zypper --non-interactive install rust cargo
+          echo "=== the toolchain this base provides ==="
+          rustc --version
+          cargo --version
 
+      # THE CACHE ACTION IS KEPT BUT ITS RUSTUP-SPECIFIC ASSUMPTIONS ARE NOT RELIED ON.
+      #
+      # Swatinem/rust-cache looks for ~/.cargo and ~/.rustup, which rustup creates and a
+      # distribution install does not: `zypper install rust cargo` puts the binaries in /usr/bin
+      # and the registry in /usr/share/cargo (CARGO_HOME is unset). The action degrades to
+      # caching `target/` only, which is the expensive part and still worth having, and it does
+      # not fail when the rustup directories are absent.
+      #
+      # `workspaces: .` rather than the action's default, because the default keys off a
+      # Cargo.lock it finds by walking up from the repository root - which is the same
+      # directory here, so this is explicit rather than different.
       - uses: Swatinem/rust-cache@v2
         with:
           key: leap-16.0
+          workspaces: .
 
       - name: fetch the shared web UI
         run: bash build-webui.sh
