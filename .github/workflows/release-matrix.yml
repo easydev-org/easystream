@@ -49,6 +49,10 @@ on:
       tag:
         description: "Existing tag to (re)build assets for"
         required: true
+      publish:
+        description: "Upload to the release, or stop after building (dry run)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -485,6 +489,14 @@ jobs:
   # --- attach everything to the release --------------------------------------
   release:
     needs: [apt, arch, fedora, leap, freebsd]
+    # DRY RUN BY DEFAULT WHEN DISPATCHED, AND THAT IS NOT CAUTION FOR ITS OWN SAKE.
+    #
+    # `softprops/action-gh-release` with an existing `tag_name` APPENDS to that release and
+    # replaces same-named assets. Dispatching this workflow against the tag that is already
+    # published - which is the only tag that exists - would silently overwrite the assets
+    # at least one guest is running today. A push of `v*` publishes; a dispatch has to say
+    # so explicitly.
+    if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -492,7 +504,7 @@ jobs:
           path: /tmp/assets
           merge-multiple: true
 
-      - name: what is being published, and the ABI each one wants
+      - name: what would be published, and the ABI each one wants
         run: |
           ls -l /tmp/assets
           echo "--- one line per asset ---"
