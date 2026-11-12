@@ -31,7 +31,21 @@ name: release-matrix
 #     fedora-43      fedora-workstation                  glibc 2.41, x264 165   [NOT YET]
 #     opensuse-tw    opensuse-tumbleweed                 rolling,    x264 165   [NOT YET]
 #     nixos-26.05    nixos                               (release.yml's own job)
-#     freebsd        ghostbsd                            (vmactions, below)
+#     freebsd        freebsd 15                          (vmactions, below)
+#
+# GHOSTBSD IS NOT BUILT HERE, AND THAT IS A DECISION RATHER THAN A GAP.
+#
+# GhostBSD 14 reports ABI `FreeBSD:14:amd64`, the same string FreeBSD 14 does, so `pkg`
+# accepts either catalogue into either system - while the libraries differ:
+#
+#     pkg.freebsd.org/FreeBSD:14:amd64     libx264 0.165.3223_1
+#     pkg.ghostbsd.org/FreeBSD:14:amd64    libx264 0.164.3095
+#
+# and libx264 renames its soname and its symbols together, so a package built for one
+# cannot run against the other. Building for GhostBSD therefore means resolving against
+# GhostBSD's own catalogue, which runs months behind FreeBSD's ports tree - and that
+# produced a package for a release (14.x) that is being superseded. GhostBSD 26 is the
+# next target, and it gets its own row when its disk exists to test against.
 #
 # WHY FEDORA AND OPENSUSE ARE NOT HERE YET
 #
@@ -643,67 +657,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GHOSTBSD SHIPS FreeBSD 14, SO 14 GETS ITS OWN BUILD AND ITS OWN PACKAGE.
-          #
-          # The ABI is a hard gate and `pkg` enforces it:
-          #
-          #     pkg: wrong architecture: FreeBSD:15:amd64 instead of FreeBSD:14:amd64
-          #
-          # - and `pkg add -f` does not override it, because the check is in the installer,
-          # not in a convenience flag. GhostBSD 14.1 reports `pkg config abi` =
-          # `FreeBSD:14:amd64`, and the repository for that ABI is
-          # https://pkg.freebsd.org/FreeBSD:14:amd64/latest/ (200), so a 14.x build resolves
-          # against libraries a 14.x guest actually has.
-          #
-          # 14.1 IS THE RELEASE, NOT 14: the guest reports 14.1-STABLE and vmactions needs a
-          # point release to fetch an image. `FreeBSD:14.1:amd64` does not exist as a
-          # repository, which is the same reason 15.0 and 15.1 both resolve against
-          # `FreeBSD:15` - packages are built per major, and a point release bumps the kernel
-          # and userland without rebuilding ports.
-          # `repo` SAYS WHICH PACKAGE REPOSITORY THIS BUILD MUST RESOLVE AGAINST, and for 14
-          # that is NOT FreeBSD's own.
-          #
-          # IT IS THE SAME ABI AND A DIFFERENT CATALOGUE. GhostBSD 14 is a FreeBSD 14
-          # downstream, so it reports the identical ABI string and `pkg` will happily install
-          # FreeBSD-built packages into it:
-          #
-          #     pkg.freebsd.org/FreeBSD:14:amd64/latest   libx264 0.165.3223_1
-          #     pkg.ghostbsd.org/stable/FreeBSD:14:amd64  libx264 0.164.3095
-          #
-          # But libx264 changes its soname AND its symbol names together, so a binary linked
-          # against 165 asks for `x264_encoder_open_165` and `libx264.so.165`, and neither
-          # exists in the 164 the GhostBSD guest actually has. No symlink bridges that - the
-          # symbol is absent from the library, not just misnamed.
-          #
-          # GhostBSD's catalogue is maintained separately and runs behind FreeBSD's ports tree
-          # (its index was last written 2026-04-18 against FreeBSD's 2026-11-10), which is
-          # exactly why the version differs. A package for a GhostBSD guest has to be built
-          # from the catalogue that guest installs from.
-          # 14.4, NOT 14.1, AND THE PACKAGE INDEX IS WHY.
-          #
-          # `pkg` refuses a package whose declared FreeBSD_version is newer than the running
-          # system, and the two catalogues were built at different points in the 14 branch:
-          #
-          #     GhostBSD libx264   annotations.FreeBSD_version = 1403000   (14.3)
-          #     FreeBSD libx264    annotations.FreeBSD_version = 1404000   (14.4)
-          #
-          # and the kernel of each release reports:
-          #
-          #     releng/14.1 -> __FreeBSD_version 1401000
-          #     releng/14.3 -> __FreeBSD_version 1403000
-          #     releng/14.4 -> __FreeBSD_version 1404000
-          #
-          # A 14.1 VM is therefore TOO OLD for the GhostBSD catalogue:
-          #
-          #     pkg: repository GhostBSD contains packages for wrong OS version: FreeBSD:14:amd64
-          #     Unable to update repository GhostBSD
-          #
-          # `IGNORE_OSVERSION=yes` would silence that check, and is the wrong answer: it also
-          # disables the guard that stops a package built for a NEWER kernel being installed on
-          # an older one. Bumping the VM to 14.4 satisfies the check instead of skipping it, and
-          # the resulting package declares ABI `FreeBSD:14:amd64` like every other 14.x guest,
-          # which is what a published artifact should say.
-          - { release: "14.4", key: "freebsd-14", repo: "ghostbsd" }
           - { release: "15.1", key: "freebsd-15", repo: "freebsd" }
     runs-on: ubuntu-latest
     steps:
@@ -729,43 +682,6 @@ jobs:
         with:
           release: "${{ matrix.release }}"
           prepare: |
-            # SWITCH THE CATALOGUE BEFORE INSTALLING ANYTHING, FOR THE GHOSTBSD ROW.
-            #
-            # This has to happen FIRST. `pkg install` resolves against whatever is configured,
-            # so a single package installed from FreeBSD's catalogue before the switch pins
-            # this VM to a library version the GhostBSD guest does not have.
-            if [ "${{ matrix.repo }}" = "ghostbsd" ]; then
-              echo "=== switching to the GhostBSD catalogue ==="
-              mkdir -p /usr/local/etc/pkg/repos
-              # THE KEY IS COMMITTED, NOT FETCHED. GhostBSD publishes its repository through
-              # a Storj-backed mirror that serves the packages but no standalone URL for the
-              # signing key, and the key is a public certificate - so it lives in this
-              # repository beside this workflow.
-              mkdir -p /usr/local/share/keys
-              cp "$GITHUB_WORKSPACE/ci/freebsd-repo/ghostbsd.cert" \
-                 /usr/local/share/keys/ghostbsd.cert
-              ls -l /usr/local/share/keys/ghostbsd.cert
-              cat > /usr/local/etc/pkg/repos/GhostBSD.conf <<'CONF'
-            GhostBSD: {
-              url: "https://pkg.ghostbsd.org/stable/FreeBSD:14:amd64/latest",
-              signature_type: "pubkey",
-              pubkey: "/usr/local/share/keys/ghostbsd.cert",
-              enabled: yes
-            }
-            CONF
-              # FreeBSD's own repositories have to go, or the resolver sees two catalogues
-              # offering the same ports at different versions and picks by priority, which is
-              # not a decision this build wants to delegate.
-              for f in /etc/pkg/FreeBSD.conf /usr/local/etc/pkg/repos/FreeBSD.conf; do
-                # `-[[:space:]]*` absorbs the spacing variants; pkg accepts both `enabled:yes` and
-                # `enabled: yes`, and a sed that only matches one of them leaves the other
-                # catalogue enabled - which is the failure this block exists to prevent.
-                [ -f "$f" ] && sed -i -E 's/(enabled)[[:space:]]*:[[:space:]]*yes/\1: no/' "$f" || true
-                done
-              pkg update -f
-              echo "=== the catalogue this build will resolve against ==="
-              pkg rquery '%n %v' 2>/dev/null | grep -E '^libx264 ' || echo "  libx264 NOT FOUND"
-            fi
             pkg install -y rust pkgconf gmake libx264 libxcb libX11 libXtst libXfixes \
                            opus dbus at-spi2-core libyuv bash
           run: |
@@ -795,13 +711,8 @@ jobs:
             #
             #     ld-elf.so.1: Shared object "libx264.so.165" not found
             #
-            # so it is asserted at build time, against the version this row is supposed to
-            # resolve against.
-            if [ "${{ matrix.repo }}" = "ghostbsd" ]; then
-              want=164
-            else
-              want=165
-            fi
+            # so it is asserted at build time against the version FreeBSD 15 ships.
+            want=165
             have=$(nm -D target/release/easystream 2>/dev/null \
                    | grep -m1 -oE 'x264_encoder_open_[0-9]+' | grep -oE '[0-9]+$' || echo "")
             echo "=== this build must ask for ABI $want, it asks for ${have:-nothing} ==="
