@@ -1,9 +1,16 @@
 #!/bin/sh
 # Make easystream build on FreeBSD as an X11-only daemon.
 #
-# THIS IS THE SAME FOUR CHANGES THAT WERE MEASURED ON A REAL GHOSTBSD 14.1 GUEST, moved into
-# a script so the CI job and a person's terminal run the identical thing. Each one is here
-# because the build fails without it, and each failure is named.
+# PURE POSIX SH. The first version used python3 for its three text edits, which is one more
+# dependency than a patch script should have: FreeBSD's base system has no python3, so the
+# job died at
+#
+#     ci/patch-freebsd.sh: python3: not found
+#
+# before cargo was reached. Everything below is sed and here-documents, which every system
+# this builds on already has.
+#
+# THE FOUR CHANGES, EACH BECAUSE THE BUILD FAILS WITHOUT IT
 #
 #   1. build.rs has no freebsd branch, so it tries to compile the wlroots protocol sources
 #      and link wayland-client / xkbcommon / libyuv - none of which the X11 path uses.
@@ -27,53 +34,54 @@ SRC=$(cd "$(dirname "$0")/.." && pwd)
 cd "$SRC"
 
 echo "=== 1. build.rs: a freebsd branch ==="
-if ! grep -q freebsd build.rs; then
-  python3 - <<'PY'
-import re
-p = "build.rs"
-s = open(p).read()
-marker = '    if target_os == "windows" {\n        return;\n    }\n'
-assert marker in s, "build.rs no longer starts with the windows early-return"
-branch = '''
-    // FREBSD IS X11-ONLY. GhostBSD's desktop is Xorg, `probe.rs` picks Session::X11
-    // because WAYLAND_DISPLAY is unset, and the wlroots protocol sources plus
-    // wayland-client / xkbcommon / libyuv have no business in this build.
-    //
-    // What survives is exactly what src/x11shim.c includes: xcb, xcb-xtest, xcb-shm,
-    // xcb-xfixes, xcb-render - plus the two encoders.
-    if target_os == "freebsd" {
-        for f in ["src/x264shim.cpp", "src/opusshim.cpp", "src/x11shim.c"] {
-            println!("cargo:rerun-if-changed={f}");
-        }
-        cc::Build::new().file("src/x264shim.cpp").compile("na_x264");
-        cc::Build::new().file("src/opusshim.cpp").compile("na_opus");
-        cc::Build::new().file("src/x11shim.c").compile("na_x11");
-        println!("cargo:rustc-link-lib=x264");
-        println!("cargo:rustc-link-lib=opus");
-        println!("cargo:rustc-link-lib=xcb");
-        println!("cargo:rustc-link-lib=xcb-xtest");
-        println!("cargo:rustc-link-lib=xcb-shm");
-        println!("cargo:rustc-link-lib=xcb-xfixes");
-        println!("cargo:rustc-link-lib=xcb-render");
-        println!("cargo:rustc-link-lib=stdc++");
-        return;
-    }
-'''
-open(p, "w").write(s.replace(marker, marker + branch, 1))
-print("  build.rs patched")
-PY
+if grep -q "freebsd" build.rs; then
+    echo "  already patched"
 else
-  echo "  already patched"
+    # Insert right after the windows early-return, so the ordering stays
+    # "windows: no C at all; freebsd: x11 C only; everything else: the full set".
+    awk '
+      { print }
+      /^    if target_os == "windows" \{$/ { inwin = 1 }
+      inwin && /^    \}$/ && !done {
+        print ""
+        print "    // FREBSD IS X11-ONLY. GhostBSD'"'"'s desktop is Xorg, `probe.rs` picks Session::X11"
+        print "    // because WAYLAND_DISPLAY is unset, and the wlroots protocol sources plus"
+        print "    // wayland-client / xkbcommon / libyuv have no business in this build."
+        print "    //"
+        print "    // What survives is exactly what src/x11shim.c includes: xcb, xcb-xtest,"
+        print "    // xcb-shm, xcb-xfixes, xcb-render - plus the two encoders."
+        print "    if target_os == \"freebsd\" {"
+        print "        for f in [\"src/x264shim.cpp\", \"src/opusshim.cpp\", \"src/x11shim.c\"] {"
+        print "            println!(\"cargo:rerun-if-changed={f}\");"
+        print "        }"
+        print "        cc::Build::new().file(\"src/x264shim.cpp\").compile(\"na_x264\");"
+        print "        cc::Build::new().file(\"src/opusshim.cpp\").compile(\"na_opus\");"
+        print "        cc::Build::new().file(\"src/x11shim.c\").compile(\"na_x11\");"
+        print "        println!(\"cargo:rustc-link-lib=x264\");"
+        print "        println!(\"cargo:rustc-link-lib=opus\");"
+        print "        println!(\"cargo:rustc-link-lib=xcb\");"
+        print "        println!(\"cargo:rustc-link-lib=xcb-xtest\");"
+        print "        println!(\"cargo:rustc-link-lib=xcb-shm\");"
+        print "        println!(\"cargo:rustc-link-lib=xcb-xfixes\");"
+        print "        println!(\"cargo:rustc-link-lib=xcb-render\");"
+        print "        println!(\"cargo:rustc-link-lib=stdc++\");"
+        print "        return;"
+        print "    }"
+        done = 1
+        inwin = 0
+      }
+    ' build.rs > build.rs.new
+    mv build.rs.new build.rs
+    echo "  build.rs patched"
 fi
 
 echo "=== 2. wayland.rs / portal.rs become stubs ==="
-for pair in "wayland:Wayland" "portal:Portal"; do
-  mod=${pair%%:*}
-  f="src/$mod.rs"
-  [ -f "$f.linux" ] || cp "$f" "$f.linux"
+for mod in wayland portal; do
+    f="src/$mod.rs"
+    [ -f "$f.linux" ] || cp "$f" "$f.linux"
 done
 
-cat > src/wayland.rs <<'EOF'
+cat > src/wayland.rs <<'RS'
 //! The Wayland backends, absent on this platform.
 //!
 //! `est.rs` holds `Capture::Wl(Wayland)` and `Input::Wl(WlInput)` as enum variants and
@@ -110,9 +118,9 @@ impl WlInput {
     pub fn key(&self, _keycode: u8, _down: bool) {}
     pub fn close(&self) {}
 }
-EOF
+RS
 
-cat > src/portal.rs <<'EOF'
+cat > src/portal.rs <<'RS'
 //! The xdg-desktop-portal ScreenCast backend, absent on this platform.
 //!
 //! The portal path needs libpipewire and libdbus plus a D-Bus session owning a ScreenCast
@@ -141,24 +149,50 @@ impl Portal {
     pub fn key(&self, _code: i32, _down: bool) -> bool { false }
     pub fn close(&self) {}
 }
-EOF
+RS
 echo "  stubs written"
 
 echo "=== 3. probe.rs: no na_probe_wayland on freebsd ==="
-if ! grep -q 'target_os = "freebsd"' src/probe.rs; then
-  python3 - <<'PY'
-p = "src/probe.rs"
-s = open(p).read()
-old = '''extern "C" {
-    fn na_probe_wayland(out: *mut libc::c_int) -> libc::c_int;
-}
+if grep -q 'target_os = "freebsd"' src/probe.rs; then
+    echo "  already patched"
+else
+    # Replace the extern block and the function with two cfg-gated versions.
+    awk '
+      /^extern "C" \{$/ { inextern = 1 }
+      inextern && /na_probe_wayland/ { hold = 1 }
+      hold {
+        print
+        if (/^\}$/ && !printed_fallback) {
+          # closing brace of wayland_globals, after the extern block
+          printed_fallback = 1
+        }
+        next
+      }
+      { print }
+    ' src/probe.rs > /dev/null 2>&1 || true
 
-fn wayland_globals() -> Option<[i32; 8]> {
-    let mut out = [0i32; 8];
-    let rc = unsafe { na_probe_wayland(out.as_mut_ptr()) };
-    if rc == 0 { Some(out) } else { None }
-}'''
-new = '''// wlprobe.c IS NOT COMPILED ON FREBSD, so the symbol below would not link. The answer it
+    # A marker-based rewrite: the block is known verbatim, so locate and cut it with sed
+    # line numbers rather than trying to match braces.
+    start=$(grep -n '^extern "C" {$' src/probe.rs | head -1 | cut -d: -f1)
+    if [ -z "$start" ]; then
+        echo "  === probe.rs: could not find the extern block ===" >&2
+        exit 1
+    fi
+    # the block ends at the first "^}" after the wayland_globals fn
+    fn=$(grep -n 'fn wayland_globals' src/probe.rs | head -1 | cut -d: -f1)
+    if [ -z "$fn" ]; then
+        echo "  === probe.rs: could not find wayland_globals ===" >&2
+        exit 1
+    fi
+    end=$(awk -v from="$fn" 'NR>=from && /^}/{ print NR; exit }' src/probe.rs)
+    if [ -z "$end" ]; then
+        echo "  === probe.rs: could not find the end of wayland_globals ===" >&2
+        exit 1
+    fi
+
+    head -n $((start - 1)) src/probe.rs > src/probe.rs.new
+    cat >> src/probe.rs.new <<'RS'
+// wlprobe.c IS NOT COMPILED ON FREBSD, so the symbol below would not link. The answer it
 // would give is known in advance: GhostBSD runs Xorg and exports no wlroots globals.
 // Reporting None is what makes detect() take the `x_env -> Session::X11` branch.
 #[cfg(not(target_os = "freebsd"))]
@@ -176,38 +210,39 @@ fn wayland_globals() -> Option<[i32; 8]> {
 #[cfg(target_os = "freebsd")]
 fn wayland_globals() -> Option<[i32; 8]> {
     None
-}'''
-assert old in s, "probe.rs's wayland probe changed shape"
-open(p, "w").write(s.replace(old, new, 1))
-print("  probe.rs patched")
-PY
-else
-  echo "  already patched"
+}
+RS
+    tail -n +$((end + 1)) src/probe.rs >> src/probe.rs.new
+    mv src/probe.rs.new src/probe.rs
+    echo "  probe.rs patched (lines $start..$end replaced)"
 fi
 
 echo "=== 4. x11shim.c: memfd_create -> shm_open(SHM_ANON) ==="
-if ! grep -q SHM_ANON src/x11shim.c; then
-  python3 - <<'PY'
-p = "src/x11shim.c"
-s = open(p).read()
-old = '    int fd = memfd_create("xshm", MFD_CLOEXEC);'
-new = '''#if defined(__FreeBSD__)
+if grep -q SHM_ANON src/x11shim.c; then
+    echo "  already patched"
+else
+    # fcntl.h for O_RDWR, then the three-line replacement.
+    grep -q '#include <fcntl.h>' src/x11shim.c || \
+      sed -i.bak 's|#include <sys/mman.h>|#include <sys/mman.h>\n#include <fcntl.h>|' src/x11shim.c
+
+    cat > /tmp/x11shim_patch.txt <<'PATCH'
+#if defined(__FreeBSD__)
     // FREBSD HAS memfd_create(2) SINCE 13.0 BUT NO GLIBC-STYLE DECLARATION in sys/mman.h.
     // shm_open(SHM_ANON) is FreeBSD's own anonymous shared memory and is the same object
     // from the guest's point of view: an fd that ftruncate() sizes and mmap() maps.
     int fd = shm_open(SHM_ANON, O_RDWR, 0);
 #else
     int fd = memfd_create("xshm", MFD_CLOEXEC);
-#endif'''
-assert old in s, "x11shim.c's memfd_create line changed"
-s = s.replace(old, new, 1)
-if "#include <fcntl.h>" not in s:
-    s = s.replace("#include <sys/mman.h>", "#include <sys/mman.h>\n#include <fcntl.h>", 1)
-open(p, "w").write(s)
-print("  x11shim.c patched")
-PY
-else
-  echo "  already patched"
+#endif
+PATCH
+    # Use awk to replace the single line with the multi-line block.
+    awk -v patch="$(cat /tmp/x11shim_patch.txt)" '
+      /int fd = memfd_create\("xshm", MFD_CLOEXEC\);/ { print patch; next }
+      { print }
+    ' src/x11shim.c > src/x11shim.c.new
+    mv src/x11shim.c.new src/x11shim.c
+    rm -f src/x11shim.c.bak
+    echo "  x11shim.c patched"
 fi
 
 echo

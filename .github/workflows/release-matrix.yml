@@ -457,39 +457,54 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Packman, because x264 is not in Leap's OSS repo
+      # X264 AND LIBYUV ARE NOT IN LEAP'S OSS REPOSITORY, AND THEY ARE NOT IN THE SAME
+      # PLACE AS EACH OTHER. Measured against the repositories themselves:
+      #
+      #   x264      Packman Essentials   libx264-165-20250608.b35605ac, libx264-devel
+      #   libyuv    OBS multimedia:libs  libyuv-devel-20230517+a377993-lp161
+      #
+      # Leap's own OSS repo has neither - its x264 is inside ffmpeg-4 and not exposed as a
+      # library, and `libsharpyuv0` is WebP's, not libyuv.
+      #
+      # PACKMAN VIA ftp.gwdg.de, NOT packman.inode.at. The canonical host answered nothing
+      # (curl exit 35) when this was being written, while the GWDG mirror served the same
+      # tree. A build that depends on one mirror of a third-party repository is a build
+      # that stops for reasons unrelated to this code.
+      - name: Packman and multimedia:libs, for the two libraries Leap does not carry
         run: |
           set -eu
           . /etc/os-release
-          echo "this base: $PRETTY_NAME"
-          for repo in "openSUSE_Leap_${VERSION_ID}" "openSUSE_Leap_${VERSION_ID%%.*}"; do
-            url="http://packman.inode.at/suse/$repo/"
-            if curl -sfI "${url}Essentials/x86_64/" >/dev/null 2>&1 || \
-               curl -sfI "${url}x86_64/" >/dev/null 2>&1; then
-              echo "packman: $repo"
-              zypper --non-interactive addrepo --refresh --priority 90 "$url" packman
-              zypper --non-interactive --gpg-auto-import-keys refresh
-              zypper --non-interactive --gpg-auto-import-keys install --from packman \
-                libx264-devel x264 libyuv-devel || true
-              exit 0
-            fi
-          done
-          echo "=== packman has no repository for $VERSION_ID; trying the OSS repo alone ==="
-          zypper --non-interactive refresh
+          echo "this base: $PRETTY_NAME ($VERSION_ID)"
+
+          zypper --non-interactive addrepo --refresh --priority 90 \
+            "https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Leap_${VERSION_ID}/Essentials/" packman
+          zypper --non-interactive addrepo --refresh --priority 91 \
+            "https://download.opensuse.org/repositories/multimedia:/libs/${VERSION_ID}/x86_64/" multimedia-libs
+
+          zypper --non-interactive --gpg-auto-import-keys refresh
 
       - name: libraries
         run: |
           set -eu
           zypper --non-interactive install \
             gcc gcc-c++ make pkg-config \
-            dbus-1-devel opus-devel \
+            dbus-1-devel libopus-devel \
             pipewire-devel \
             libxcb-devel xcb-util-devel \
             wayland-devel libxkbcommon-devel \
-            libX11-devel \
-            libx264-devel libyuv-devel || true
+            libX11-devel
+          echo "=== the two that come from elsewhere ==="
+          zypper --non-interactive install --from packman libx264-devel
+          zypper --non-interactive install --from multimedia-libs libyuv-devel
+          echo
           echo "=== what this base provides ==="
-          rpm -qa 2>/dev/null | grep -iE '^(libx264|libyuv|opus|pipewire)' | sort || true
+          rpm -qa 2>/dev/null | grep -iE '^(libx264|libyuv|libopus|pipewire)' | sort
+          echo "=== the ABI this base will link against ==="
+          for so in /usr/lib64/libx264.so.*; do
+            [ -e "$so" ] || continue
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
+          done
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -509,7 +524,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -eu
-          out=/tmp/easystream-linux-amd64-leap-16.1
+          out=target/release/easystream
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
@@ -529,11 +544,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # --- FreeBSD ---------------------------------------------------------------
-  #
-  # vmactions/freebsd-vm gives a real FreeBSD VM on the runner rather than a cross-compiler,
-  # for the same reason release.yml builds arm64 on a native arm64 runner: a cross build
-  # cannot run its own tests, and the C shims must link FreeBSD's libxcb, not a Linux one.
   freebsd:
     runs-on: ubuntu-latest
     steps:
