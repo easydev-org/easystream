@@ -131,7 +131,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          key: leap-16.1
 
       - name: fetch the shared web UI
         run: bash build-webui.sh
@@ -140,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release
-          out="easystream-linux-amd64-${{ matrix.name }}"
+          out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
@@ -151,7 +151,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -euo pipefail
-          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== the ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
           echo "=== the ABI this base PROVIDES ==="
@@ -313,7 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release
-          out="easystream-linux-amd64-${{ matrix.name }}"
+          out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
@@ -321,7 +321,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -euo pipefail
-          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
@@ -336,18 +336,21 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.name }}
-          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
+          name: linux-leap-16.1
+          path: /tmp/easystream-linux-amd64-leap-16.1
           if-no-files-found: error
           retention-days: 7
 
-  # --- openSUSE Leap 16 ------------------------------------------------------
+  # --- openSUSE Leap 16.1 ----------------------------------------------------
   #
-  # THE DOCKER IMAGE IS THE ONLY THING THAT MATTERS HERE.
+  # ONE VERSION, AND THE DOCKER IMAGE IS THE ONLY THING THAT MATTERS HERE.
   #
-  # This job builds easystream against the libraries openSUSE Leap 16 ships. Whether a
-  # Leap 16 ISO also exists is a different question and not this one - the input is
-  # `opensuse/leap:16.x` and the output is a binary that resolves against what is inside it.
+  # This job builds easystream against the libraries openSUSE Leap 16.1 ships. Whether a
+  # Leap ISO also exists is a different question and not this one - the input is
+  # `opensuse/leap:16.1` and the output is a binary that resolves against what is inside it.
+  #
+  # 16.0 IS NOT BUILT. One Leap release is enough to establish what its library set looks
+  # like, and the point-release that is actually current is the one worth carrying.
   #
   # X264 IS IN PACKMAN. Leap's own OSS repository does not carry it (same patent reason as
   # Fedora), so the Packman repository is added first. `--gpg-auto-import-keys` is used
@@ -359,17 +362,9 @@ jobs:
   # `addrepo` with a 404 that says nothing about which one is right. Whichever resolves
   # first wins, and the step prints which.
   leap:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: leap-16.0
-            image: opensuse/leap:16.0
-          - name: leap-16.1
-            image: opensuse/leap:16.1
     runs-on: ubuntu-latest
     container:
-      image: ${{ matrix.image }}
+      image: opensuse/leap:16.1
     steps:
       - name: git before checkout
         run: zypper --non-interactive install ca-certificates git curl
@@ -414,7 +409,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.name }}
+          key: leap-16.1
 
       - name: fetch the shared web UI
         run: bash build-webui.sh
@@ -423,7 +418,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release
-          out="easystream-linux-amd64-${{ matrix.name }}"
+          out=easystream-linux-amd64-leap-16.1
           cp target/release/easystream "/tmp/$out"
           chmod +x "/tmp/$out"
           ls -l "/tmp/$out"
@@ -431,7 +426,7 @@ jobs:
       - name: what this binary links, and what this base provides
         run: |
           set -euo pipefail
-          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          out=/tmp/easystream-linux-amd64-leap-16.1
           echo "=== ABI this binary ASKS FOR ==="
           nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
           echo "=== ABI this base PROVIDES ==="
@@ -446,8 +441,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.name }}
-          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
+          name: linux-leap-16.1
+          path: /tmp/easystream-linux-amd64-leap-16.1
           if-no-files-found: error
           retention-days: 7
 
