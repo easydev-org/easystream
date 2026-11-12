@@ -1,0 +1,35 @@
+[Unit]
+Description=easystream — screen, input and a11y over est://
+Documentation=https://github.com/easydev-org/easystream
+# THE SESSION, NOT THE SYSTEM.
+#
+# A system unit starts before anybody logs in: no WAYLAND_DISPLAY, no DISPLAY, and no
+# session D-Bus - so AT-SPI has no bus to query and capture has no surface to grab. The
+# daemon would come up healthy and see nothing. It belongs to the user session.
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionEnvironment=DISPLAY
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/easystream
+Restart=on-failure
+RestartSec=3
+
+# The capture tools it spawns for audio (pw-record / parec) live on PATH, and a user unit
+# inherits a PATH that may not include /usr/bin on some minimal images.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Nothing here needs a controlling terminal, and asking for one makes the unit fail on
+# systems where the session has no tty.
+StandardInput=null
+
+# The daemon writes H.264 at the screen's rate; without a limit the journal keeps every
+# "pump: rss=..MB" line and fills /var/log on a long-running session.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=easystream
+
+[Install]
+WantedBy=graphical-session.target

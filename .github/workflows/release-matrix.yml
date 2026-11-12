@@ -146,10 +146,7 @@ jobs:
         run: |
           set -eu
           cargo build --release
-          out=easystream-linux-amd64-leap-16.1
-          cp target/release/easystream "/tmp/$out"
-          chmod +x "/tmp/$out"
-          ls -l "/tmp/$out"
+          sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
 
       # THE VERDICT IS IN THESE LINES, and they are what a future reader needs: which x264
       # ABI this binary asks for, which this base provides, and the glibc floor it imposes.
@@ -179,8 +176,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.name }}
-          path: /tmp/easystream-linux-amd64-*
+          name: packages-${{ matrix.name }}
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -233,10 +230,7 @@ jobs:
         run: |
           set -eu
           cargo build --release
-          out=easystream-linux-amd64-arch
-          cp target/release/easystream "/tmp/$out"
-          chmod +x "/tmp/$out"
-          ls -l "/tmp/$out"
+          sh ci/package.sh "arch" "${GITHUB_REF_NAME:-0.0.0}"
 
       - name: what this binary links, and what this base provides
         run: |
@@ -256,8 +250,95 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-arch
-          path: /tmp/easystream-linux-amd64-arch
+          name: packages-arch
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- Manjaro -----------------------------------------------------------------
+  #
+  # MANJARO IS NOT ARCH FOR THIS PURPOSE, EVEN THOUGH ITS PACKAGES ARE.
+  #
+  # Manjaro's stable branch takes Arch's packages and holds them back one to two weeks.
+  # Measured today, the two were identical:
+  #
+  #     Manjaro stable extra/x264   0.165.r3222.b35605a-2
+  #     Arch           extra/x264   0.165.r3222.b35605a-2
+  #
+  # - same version, same git commit - which is why the arch job had been covering
+  # cachyos, endeavour and manjaro with one binary. But that agreement is a window, not a
+  # guarantee: the day Arch bumps x264 and Manjaro has not caught up, the arch binary
+  # stops resolving there and nothing in the pipeline would say so. One more build removes
+  # the window.
+  #
+  # `manjarolinux/base` is Manjaro's own image. Its sources point at the STABLE branch,
+  # which is the one easydiskbake bakes from - not testing or unstable.
+  manjaro:
+    runs-on: ubuntu-latest
+    container:
+      image: manjarolinux/base:latest
+    steps:
+      - name: git and the keyring, before checkout
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring manjaro-keyring ca-certificates git
+
+      - uses: actions/checkout@v4
+
+      - name: which branch this image tracks
+        run: |
+          echo "=== the repositories this image uses ==="
+          grep -vE '^\s*#|^\s*$' /etc/pacman.conf | head -20
+          echo "=== the mirrors ==="
+          cat /etc/pacman.d/mirrorlist 2>/dev/null | grep -m3 '^Server'
+          echo "=== os-release ==="
+          cat /etc/os-release | grep -m4 .
+
+      - name: libraries from Manjaro's own repositories
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel pkgconf curl \
+            dbus x264 libyuv opus \
+            pipewire \
+            libxcb xcb-util \
+            wayland libxkbcommon libx11
+          echo "=== what Manjaro provides ==="
+          pacman -Q x264 libyuv opus dbus pipewire 2>/dev/null || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: manjaro
+
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: build
+        run: |
+          set -eu
+          cargo build --release
+          sh ci/package.sh "manjaro" "${GITHUB_REF_NAME:-0.0.0}"
+
+      - name: what this binary links, and what this base provides
+        run: |
+          set -eu
+          out=/tmp/easystream-linux-amd64-manjaro
+          echo "=== ABI this binary ASKS FOR ==="
+          nm -D "$out" 2>/dev/null | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
+          echo "=== ABI this base PROVIDES ==="
+          for so in /usr/lib/libx264.so.*; do
+            [ -e "$so" ] || continue
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
+          done
+          echo "=== glibc floor ==="
+          objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
+          ldd "$out" 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-manjaro
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -320,10 +401,7 @@ jobs:
         run: |
           set -eu
           cargo build --release
-          out=easystream-linux-amd64-leap-16.1
-          cp target/release/easystream "/tmp/$out"
-          chmod +x "/tmp/$out"
-          ls -l "/tmp/$out"
+          sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
 
       - name: what this binary links, and what this base provides
         run: |
@@ -343,8 +421,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-leap-16.1
-          path: /tmp/easystream-linux-amd64-leap-16.1
+          name: packages-${{ matrix.name }}
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -426,10 +504,7 @@ jobs:
         run: |
           set -eu
           cargo build --release
-          out=easystream-linux-amd64-leap-16.1
-          cp target/release/easystream "/tmp/$out"
-          chmod +x "/tmp/$out"
-          ls -l "/tmp/$out"
+          sh ci/package.sh "leap-16.1" "${GITHUB_REF_NAME:-0.0.0}"
 
       - name: what this binary links, and what this base provides
         run: |
@@ -449,8 +524,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-leap-16.1
-          path: /tmp/easystream-linux-amd64-leap-16.1
+          name: packages-leap-16.1
+          path: dist/*
           if-no-files-found: error
           retention-days: 7
 
@@ -517,7 +592,7 @@ jobs:
 
   # --- attach everything to the release --------------------------------------
   release:
-    needs: [apt, arch, fedora, leap, freebsd]
+    needs: [apt, arch, manjaro, fedora, leap, freebsd]
     # DRY RUN BY DEFAULT WHEN DISPATCHED, AND THAT IS NOT CAUTION FOR ITS OWN SAKE.
     #
     # `softprops/action-gh-release` with an existing `tag_name` APPENDS to that release and
@@ -533,18 +608,31 @@ jobs:
           path: /tmp/assets
           merge-multiple: true
 
-      - name: what would be published, and the ABI each one wants
+      # THE VERDICT IS NOW IN THE PACKAGE METADATA, AND THAT IS THE IMPROVEMENT.
+      #
+      # A bare binary says nothing about what it needs; these packages carry `Depends:` /
+      # `Requires:` / `depend=` lines a package manager reads before installing. Printing
+      # them here means a wrong dependency name is visible in the release log rather than
+      # in a user's failed install.
+      - name: what would be published, with the dependencies each one declares
         run: |
+          set -eu
           ls -l /tmp/assets
-          echo "--- one line per asset ---"
-          for f in /tmp/assets/easystream-*; do
-            abi=$(nm -D "$f" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || true)
-            printf "%-46s %s\n" "$(basename "$f")" "${abi:-static/none}"
+          echo
+          for f in /tmp/assets/*; do
+            echo "=== $(basename "$f") ==="
+            case "$f" in
+              *.deb) dpkg-deb -f "$f" Package Version Depends 2>/dev/null || true ;;
+              *.rpm) rpm -qp --qf '%{NAME} %{VERSION}\nRequires: [%{REQUIRENAME} ]\n' "$f" 2>/dev/null || true ;;
+              *.pkg.tar.zst) tar -xOf "$f" .PKGINFO 2>/dev/null | grep -E '^(pkgname|pkgver|depend)' || true ;;
+              *) file "$f" ;;
+            esac
+            echo
           done
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: /tmp/assets/easystream-*
+          files: /tmp/assets/*
           fail_on_unmatched_files: true
           generate_release_notes: false

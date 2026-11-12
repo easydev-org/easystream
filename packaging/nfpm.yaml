@@ -1,0 +1,126 @@
+# nFPM: one configuration, five native package formats.
+#
+# WHAT THIS REPLACES, AND WHY
+#
+# The release used to publish bare executables named after the base they were built on -
+# easystream-linux-amd64-ubuntu-26.04 and seven more. That is the wrong distribution shape
+# for a person installing software: nothing declares which libraries the binary needs, no
+# package manager can upgrade it, and the user has to know which of eight files matches
+# their machine.
+#
+# A native package answers all three. The dependencies below become `Depends:` in a .deb,
+# `Requires:` in an .rpm and `depends=` in a .pkg.tar.zst, so a package manager installs
+# libxcb before it installs this and refuses cleanly if it cannot.
+#
+# THE ONE THING THAT DOES NOT CARRY OVER
+#
+# libx264's ABI. A .deb built against libx264.so.164 will not run on a system with .165,
+# and no dependency string can express "the 164 ABI of a package called x264". That is why
+# the packages are still built per base - see release-matrix.yml - and why the filename
+# carries the base. What changes is that each one is now a package rather than a loose
+# executable.
+#
+# `nfpm package --packager deb` reads this file; the `overrides` block swaps the
+# dependency NAMES per format, because Debian, Fedora and Arch call these libraries
+# different things.
+
+name: easystream
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: easydev <dev@easydev.org>
+description: |
+  The easystream daemon: screen capture, input injection, an accessibility tree and a web
+  UI, over one process.
+
+  A viewer or the easyworker connects to it; this package installs the daemon and its
+  systemd unit. It is the Linux member of a family that implements the same est:// protocol
+  natively on Windows, macOS and Android.
+vendor: easydev
+homepage: https://github.com/easydev-org/easystream
+license: MIT
+
+contents:
+  - src: ./easystream
+    dst: /usr/bin/easystream
+    file_info:
+      mode: 0755
+
+  # The unit is NOT installed enabled. Starting a daemon that captures the screen without
+  # asking is not something a package should do on a machine somebody is using; the
+  # package installs the file, `systemctl --user enable --now easystream` starts it.
+  #
+  # A USER unit, not a system one: the daemon needs the session's D-Bus (for AT-SPI) and
+  # the session's Wayland or X display, neither of which a system unit has.
+  - src: ./packaging/easystream.service
+    dst: /usr/lib/systemd/user/easystream.service
+    file_info:
+      mode: 0644
+
+  - src: ./packaging/easystream.1
+    dst: /usr/share/man/man1/easystream.1
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh
+
+# DEBIAN
+deb:
+  compression: zstd
+
+# RPM
+rpm:
+  compression: zstd
+  group: Applications/System
+
+# ARCH
+archlinux:
+  packager: easydev <dev@easydev.org>
+
+# THE DEPENDENCY NAMES, PER FORMAT.
+#
+# Same seven libraries, three spellings. `overrides` is nfpm's mechanism for exactly this:
+# one package definition, format-specific differences.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.39)
+      - libxcb1
+      - libxcb-xtest0
+      - libxcb-shm0
+      - libxcb-xfixes0
+      - libxcb-render0
+      - libx264-164
+      - libyuv0
+      - libopus0
+      - libdbus-1-3
+      - libwayland-client0
+      - libxkbcommon0
+  rpm:
+    depends:
+      - glibc >= 2.39
+      - libxcb
+      - libxcb-xtest
+      - libxcb-shm
+      - libxcb-xfixes
+      - libxcb-render
+      - x264-libs
+      - libyuv
+      - opus
+      - dbus-libs
+      - libwayland-client
+      - libxkbcommon
+  archlinux:
+    depends:
+      - glibc>=2.39
+      - libxcb
+      - x264
+      - libyuv
+      - opus
+      - dbus
+      - wayland
+      - libxkbcommon

@@ -1,0 +1,76 @@
+.TH EASYSTREAM 1 "2026-11-12" "easystream" "User Commands"
+.SH NAME
+easystream \- screen capture, input injection and an accessibility tree over est://
+.SH SYNOPSIS
+.B easystream
+.RI [ options ]
+.SH DESCRIPTION
+.B easystream
+is the daemon half of a two-process design. It owns the screen, the pointer, the keyboard
+and the platform's accessibility tree, and publishes them on two channels:
+.TP
+.B est:// (TCP, 48079)
+One connection carrying the H.264 video stream, input events and clipboard. Input shares
+the connection with the video so that a gesture is ordered against the frame it acts on.
+.TP
+.B HTTP (48078)
+Discrete requests: the accessibility tree, one-shot screenshots, input primitives, and the
+web UI at
+.BR / .
+.PP
+A viewer, or
+.BR easyworker ,
+connects to it. This program does not decide what to do with the screen; it makes the
+screen reachable.
+.SH OPTIONS
+The daemon is configured through the environment, because it is normally started by a
+session unit rather than typed at a prompt.
+.TP
+.B EASYSTREAM_PORT
+The est port. Default 48079.
+.TP
+.B EASYSTREAM_HTTP_PORT
+The HTTP and WebSocket port. Default 48078.
+.TP
+.B EASYSTREAM_AUDIO_SOURCE
+The PipeWire or PulseAudio source to record. Default
+.BR vsink.monitor .
+.SH FILES
+.TP
+.I /usr/lib/systemd/user/easystream.service
+The user unit. It is installed but not enabled:
+.B systemctl --user enable --now easystream
+.TP
+.I /usr/share/easystream/
+The web UI served at
+.BR / .
+.SH EXAMPLES
+Start it in the current session and open the UI:
+.PP
+.nf
+.RS
+systemctl --user start easystream
+xdg-open http://127.0.0.1:48078/
+.RE
+.fi
+.PP
+Ask what the daemon decided it can do:
+.PP
+.nf
+.RS
+curl -s http://127.0.0.1:48078/capabilities | jq
+.RE
+.fi
+.SH NOTES
+.B libx264's ABI is part of the package.
+.PP
+This daemon links libx264, whose ABI number appears in both the SONAME and every exported
+symbol
+.RB ( libx264.so.164
+exports
+.BR x264_encoder_open_164 ).
+A package built against one ABI does not run against another, and no dependency string can
+express it. The package name carries the base it was built for; installing the one that
+matches the system's libx264 is the whole of it.
+.SH SEE ALSO
+.BR easyworker (1)
