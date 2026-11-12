@@ -76,12 +76,6 @@ jobs:
           - name: ubuntu-24.04
             image: ubuntu:24.04
 
-          # Debian 12 is the FLOOR for this family: glibc 2.36. A binary built on 24.04
-          # cannot start there, and its libx264 is 164 like 24.04's - so the difference is
-          # glibc alone, which is exactly the constraint worth proving.
-          - name: debian-12
-            image: debian:12
-
           - name: debian-13
             image: debian:13
 
