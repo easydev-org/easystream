@@ -460,41 +460,46 @@ jobs:
   # for the same reason release.yml builds arm64 on a native arm64 runner: a cross build
   # cannot run its own tests, and the C shims must link FreeBSD's libxcb, not a Linux one.
   freebsd:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: freebsd-15.0
-            release: "15.0"
-          - name: freebsd-15.1
-            release: "15.1"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # ONE BUILD PER FREEBSD RELEASE, for the same reason there is one per Linux base:
-      # a binary links the libx264 built by that release's ports tree. FreeBSD 15.0 and
-      # 15.1 ship different ports revisions, and a binary built on 15.1 may reference a
-      # symbol 15.0's libx264 does not carry. `release:` names the VM image, and the
-      # action fetches the newest matching one.
-      - name: build on FreeBSD ${{ matrix.release }}
+      # ONE BUILD, FOR 15.1, AND THE REASON IT DOES NOT NEED ONE PER POINT RELEASE IS THE
+      # PACKAGE REPOSITORY.
+      #
+      # FreeBSD's binary packages are built per MAJOR version, not per point release:
+      #
+      #     https://pkg.freebsd.org/FreeBSD:15:amd64/latest/     200
+      #     https://pkg.freebsd.org/FreeBSD:15.0:amd64/latest/   404
+      #     https://pkg.freebsd.org/FreeBSD:15.1:amd64/latest/   404
+      #
+      # So 15.0 and 15.1 install the SAME libx264 from the same catalog - a point release
+      # bumps the kernel and userland, and does not rebuild ports. A binary linked here
+      # resolves against that one catalog, which is why one build covers 15.x.
+      #
+      # A major version WOULD need its own build (a `FreeBSD:16:amd64` repository with its
+      # own ports revision), and this row is where that goes when 16 arrives.
+      - name: build on FreeBSD 15.1
         uses: vmactions/freebsd-vm@v1
         with:
-          release: ${{ matrix.release }}
+          release: "15.1"
           prepare: |
-            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes                            opus dbus at-spi2-core libyuv bash
+            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes \
+                           opus dbus at-spi2-core libyuv bash
           run: |
             set -eux
             freebsd-version
+            echo "=== the package repository this VM uses ==="
+            pkg -vv | grep -m2 url
             # build-webui.sh is the one script here with a bash shebang; everything this
             # workflow adds is POSIX sh.
             bash build-webui.sh
             sh ci/patch-freebsd.sh
             cargo build --release
-            cp target/release/easystream /tmp/easystream-linux-amd64-${{ matrix.name }}
-            ls -l /tmp/easystream-linux-amd64-${{ matrix.name }}
+            cp target/release/easystream /tmp/easystream-linux-amd64-freebsd-15
+            ls -l /tmp/easystream-linux-amd64-freebsd-15
             echo "=== the ABI this binary ASKS FOR ==="
-            nm -D "/tmp/easystream-linux-amd64-${{ matrix.name }}" 2>/dev/null \
+            nm -D /tmp/easystream-linux-amd64-freebsd-15 2>/dev/null \
               | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
             echo "=== the ABI this release PROVIDES ==="
             for so in /usr/local/lib/libx264.so.*; do
@@ -505,8 +510,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: freebsd-${{ matrix.name }}
-          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
+          name: freebsd-15
+          path: /tmp/easystream-linux-amd64-freebsd-15
           if-no-files-found: error
           retention-days: 7
 
