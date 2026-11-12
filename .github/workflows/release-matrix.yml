@@ -675,10 +675,8 @@ jobs:
             bash build-webui.sh
             sh ci/patch-freebsd.sh
             cargo build --release
-            cp target/release/easystream /tmp/easystream-linux-amd64-freebsd-15
-            ls -l /tmp/easystream-linux-amd64-freebsd-15
             echo "=== the ABI this binary ASKS FOR ==="
-            nm -D /tmp/easystream-linux-amd64-freebsd-15 2>/dev/null \
+            nm -D target/release/easystream 2>/dev/null \
               | grep -m2 -oE 'x264_encoder_open_[0-9]+' || echo "  (none)"
             echo "=== the ABI this release PROVIDES ==="
             for so in /usr/local/lib/libx264.so.*; do
@@ -686,11 +684,24 @@ jobs:
               printf "  %s: " "$so"
               nm -D "$so" 2>/dev/null | grep -m1 -oE 'x264_encoder_open_[0-9]+' || echo "?"
             done
+            # THE PACKAGE IS BUILT HERE, INSIDE THE VM, because `pkg create` and
+            # `pkg config abi` are the tools that know what a .pkg for this system is.
+            sh ci/package-freebsd.sh "${GITHUB_REF_NAME:-0.0.0}"
 
+      # THE ARTIFACT PATH IS INSIDE THE WORKSPACE, AND `vmactions/freebsd-vm` IS WHY.
+      #
+      # That action runs the `run:` block inside a FreeBSD VM and copies back only what is
+      # under the workspace. The first version wrote the binary to /tmp and the upload step
+      # failed with
+      #
+      #     No files were found with the provided path: /tmp/easystream-linux-amd64-freebsd-15
+      #
+      # - after the compile had succeeded, so the job's failure said nothing about the build.
+      # `dist/` is where package-freebsd.sh writes, and it is inside the checkout.
       - uses: actions/upload-artifact@v4
         with:
-          name: freebsd-15
-          path: /tmp/easystream-linux-amd64-freebsd-15
+          name: packages-freebsd-15
+          path: dist/*.pkg
           if-no-files-found: error
           retention-days: 7
 
