@@ -1,0 +1,509 @@
+name: release-matrix
+
+# One binary per LIBRARY BASE, because that is what has to match.
+#
+# THE PROBLEM, IN ONE LINE OF OUTPUT
+#
+#     $ ./easystream-linux-amd64
+#     symbol lookup error: undefined symbol: x264_encoder_open_164
+#
+# libx264 puts its ABI number in the SONAME *and* in every exported symbol, and the two move
+# together:
+#
+#     0.164.x -> libx264.so.164 -> x264_encoder_open_164
+#     0.165.x -> libx264.so.165 -> x264_encoder_open_165
+#
+# A symlink from .164 to .165 satisfies the loader and not the linker, so the failure lands
+# one step later, at symbol resolution. The only fix is to link against the library the guest
+# actually has - which means building on that base.
+#
+# glibc is the second constraint and it is not fixable either: a binary built on Ubuntu 26.04
+# needs GLIBC_2.39, so it will not start on Debian 12 (2.36) whatever libx264 is there.
+#
+# THE TABLE BELOW IS DERIVED FROM easydiskbake's OWN PINS. What matters is the BASE an image
+# is built on, not the distro's name:
+#
+#     ubuntu-26.04   ubuntu, kubuntu                    glibc 2.43, x264 165
+#     ubuntu-24.04   mint, popos, zorin                  glibc 2.39, x264 164
+#     debian-13      mx                                  glibc 2.41, x264 164
+#     debian-12      (the apt family's glibc floor)       glibc 2.36, x264 164
+#     arch           cachyos, endeavour, manjaro         rolling,    x264 165
+#     fedora-43      fedora-workstation                  glibc 2.41, x264 165   [NOT YET]
+#     opensuse-tw    opensuse-tumbleweed                 rolling,    x264 165   [NOT YET]
+#     nixos-26.05    nixos                               (release.yml's own job)
+#     freebsd        ghostbsd                            (vmactions, below)
+#
+# WHY FEDORA AND OPENSUSE ARE NOT HERE YET
+#
+# Their x264 is not in the official repositories - Fedora ships it in RPM Fusion and
+# openSUSE in Packman - so the install step needs an extra repository and a signature. That
+# is a different kind of change from "add a row", and getting it wrong makes the whole job
+# fail at `install` rather than at `build`, which tells the next reader nothing. They go in
+# once the stages below have run green at least once.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build assets for"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --- one container per apt-family base --------------------------------------
+  #
+  # Each runs its OWN package manager, because the point is to link the libraries that base
+  # ships. A shared apt-get step would defeat the exercise.
+  apt:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-26.04
+            image: ubuntu:26.04
+
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+
+          # Debian 12 is the FLOOR for this family: glibc 2.36. A binary built on 24.04
+          # cannot start there, and its libx264 is 164 like 24.04's - so the difference is
+          # glibc alone, which is exactly the constraint worth proving.
+          - name: debian-12
+            image: debian:12
+
+          - name: debian-13
+            image: debian:13
+
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: the base this binary will be FOR
+        run: |
+          cat /etc/os-release | head -3
+          echo "---"
+
+      # GIT BEFORE CHECKOUT, AND THIS IS NOT OPTIONAL.
+      #
+      # `container:` starts from the bare distro image, and ubuntu:26.04 / debian:13 do NOT
+      # ship git. actions/checkout@v4 runs `git` on the workspace, so putting the install
+      # step after checkout fails with
+      #
+      #     /__e/node20/bin/node: not found        (ubuntu-24.04 and older containers)
+      #     git: command not found                 (the checkout itself)
+      #
+      # The order below is the fix: package manager first, repository second.
+      - name: git, so checkout can run at all
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git
+
+      - uses: actions/checkout@v4
+
+      # The rest of the libraries, in their own step so a missing package name is one
+      # message rather than a wall that also hides the checkout failure above.
+      #
+      # THESE NAMES WERE VERIFIED on the Ubuntu 26.04 guest this repository already runs,
+      # where libx264-dev, libxcb-xtest0-dev and libyuv-dev all resolved by exactly these
+      # names. Debian 12 and 13 use the same apt archive layout.
+      - name: libraries from this base's own apt
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libdbus-1-dev libx264-dev libyuv-dev libopus-dev \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libxcb-render0-dev \
+            libwayland-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: build
+        run: |
+          set -euo pipefail
+          cargo build --release
+          out="easystream-linux-amd64-${{ matrix.name }}"
+          cp target/release/easystream "/tmp/$out"
+          chmod +x "/tmp/$out"
+          ls -l "/tmp/$out"
+
+      # THE VERDICT IS IN THESE LINES, and they are what a future reader needs: which x264
+      # ABI this binary asks for, which this base provides, and the glibc floor it imposes.
+      # A green build that prints a mismatch is a build that will fail in a guest.
+      - name: what this binary links, and what this base provides
+        run: |
+          set -euo pipefail
+          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          echo "=== the ABI this binary ASKS FOR ==="
+          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          echo "=== the ABI this base PROVIDES ==="
+          found=0
+          for so in /usr/lib/x86_64-linux-gnu/libx264.so.* /usr/lib/libx264.so.*; do
+            [ -e "$so" ] || continue
+            found=1
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+          done
+          [ "$found" = 1 ] || echo "  (libx264 shared object not found)"
+          echo "=== glibc floor this binary imposes ==="
+          objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
+          echo "=== its own glibc ==="
+          ldd --version 2>&1 | head -1
+          echo "=== ldd ==="
+          ldd "$out" 2>&1 | head -14 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.name }}
+          path: /tmp/easystream-linux-amd64-*
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- Arch (rolling) --------------------------------------------------------
+  #
+  # ONE BUILD FOR THREE DISTROS. cachyos, endeavour and manjaro are all Arch with a
+  # different installer; they track the same repositories closely enough that one binary
+  # covers all three. Arch has no release number to pin, which is why this row has no
+  # version suffix.
+  #
+  # WHY `pacman -Syu` AND NOT `-Sy`. Arch's partial-upgrade rule: refreshing the package
+  # database without upgrading the installed system leaves libraries at one version and
+  # their dependents at another, and the container is then in a state no Arch user ever
+  # has. `-Syu` inside a fresh container is a full upgrade of a throwaway - the correct
+  # thing here even though it is the wrong thing on a real machine.
+  arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      # git before checkout: archlinux:latest ships git, but the ca-certificates and the
+      # keyring are what a container needs before it can verify anything over TLS.
+      - name: keyring before anything over TLS
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring ca-certificates git
+
+      - uses: actions/checkout@v4
+
+      - name: libraries from Arch's own repositories
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel pkgconf curl \
+            dbus x264 libyuv opus \
+            pipewire \
+            libxcb xcb-util \
+            wayland libxkbcommon libx11
+          echo "=== what Arch provides ==="
+          pacman -Q x264 libyuv opus dbus pipewire 2>/dev/null || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: arch
+
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: build
+        run: |
+          set -euo pipefail
+          cargo build --release
+          out=easystream-linux-amd64-arch
+          cp target/release/easystream "/tmp/$out"
+          chmod +x "/tmp/$out"
+          ls -l "/tmp/$out"
+
+      - name: what this binary links, and what this base provides
+        run: |
+          set -euo pipefail
+          out=/tmp/easystream-linux-amd64-arch
+          echo "=== the ABI this binary ASKS FOR ==="
+          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          echo "=== the ABI this base PROVIDES ==="
+          for so in /usr/lib/libx264.so.*; do
+            [ -e "$so" ] || continue
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+          done
+          echo "=== glibc floor ==="
+          objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
+          ldd "$out" 2>&1 | head -12 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch
+          path: /tmp/easystream-linux-amd64-arch
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- Fedora -----------------------------------------------------------------
+  #
+  # TWO RELEASES, NOT ONE. Fedora is a nine-month cycle with a four-release support
+  # window, so a binary built for one release is the wrong libx264 ABI for the next about
+  # half the time. 44 and 45 are the two that matter now.
+  #
+  # X264 IS NOT IN FEDORA'S OWN REPOSITORIES. It is in RPM Fusion, because of patent
+  # licensing, and without that repository `dnf install x264-devel` fails with a bare
+  # "no match". The free repository carries the build pieces; nonfree is not needed here.
+  fedora:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fedora-44
+            image: fedora:44
+          - name: fedora-45
+            image: fedora:45
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: git and the keyring, before checkout
+        run: |
+          dnf install -y ca-certificates git curl
+
+      - uses: actions/checkout@v4
+
+      - name: RPM Fusion, because x264 is not in Fedora's repos
+        run: |
+          dnf install -y \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm"
+          dnf makecache
+
+      - name: libraries
+        run: |
+          dnf install -y \
+            gcc gcc-c++ make pkgconf-pkg-config \
+            dbus-devel x264-devel libyuv-devel opus-devel \
+            pipewire-devel \
+            libxcb-devel xcb-util-devel \
+            wayland-devel libxkbcommon-devel \
+            libX11-devel
+          echo "=== what Fedora provides ==="
+          rpm -q x264-libs libyuv opus pipewire-libs 2>/dev/null || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: build
+        run: |
+          set -euo pipefail
+          cargo build --release
+          out="easystream-linux-amd64-${{ matrix.name }}"
+          cp target/release/easystream "/tmp/$out"
+          chmod +x "/tmp/$out"
+          ls -l "/tmp/$out"
+
+      - name: what this binary links, and what this base provides
+        run: |
+          set -euo pipefail
+          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          echo "=== ABI this binary ASKS FOR ==="
+          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          echo "=== ABI this base PROVIDES ==="
+          for so in /usr/lib64/libx264.so.*; do
+            [ -e "$so" ] || continue
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+          done
+          echo "=== glibc floor ==="
+          objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
+          ldd "$out" 2>&1 | head -12 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.name }}
+          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- openSUSE Leap 16 ------------------------------------------------------
+  #
+  # THE DOCKER IMAGE IS THE ONLY THING THAT MATTERS HERE.
+  #
+  # This job builds easystream against the libraries openSUSE Leap 16 ships. Whether a
+  # Leap 16 ISO also exists is a different question and not this one - the input is
+  # `opensuse/leap:16.x` and the output is a binary that resolves against what is inside it.
+  #
+  # X264 IS IN PACKMAN. Leap's own OSS repository does not carry it (same patent reason as
+  # Fedora), so the Packman repository is added first. `--gpg-auto-import-keys` is used
+  # rather than `--no-gpg-checks`: a build that silently accepts an unsigned library is
+  # worse than one that fails.
+  #
+  # THE REPOSITORY PATH IS TRIED IN BOTH SPELLINGS. openSUSE renames these between point
+  # releases ("openSUSE_Leap_16.0" vs "openSUSE_Leap_16"), and a wrong path fails at
+  # `addrepo` with a 404 that says nothing about which one is right. Whichever resolves
+  # first wins, and the step prints which.
+  leap:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: leap-16.0
+            image: opensuse/leap:16.0
+          - name: leap-16.1
+            image: opensuse/leap:16.1
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: git before checkout
+        run: zypper --non-interactive install ca-certificates git curl
+
+      - uses: actions/checkout@v4
+
+      - name: Packman, because x264 is not in Leap's OSS repo
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          echo "this base: $PRETTY_NAME"
+          for repo in "openSUSE_Leap_${VERSION_ID}" "openSUSE_Leap_${VERSION_ID%%.*}"; do
+            url="http://packman.inode.at/suse/$repo/"
+            if curl -sfI "${url}Essentials/x86_64/" >/dev/null 2>&1 || \
+               curl -sfI "${url}x86_64/" >/dev/null 2>&1; then
+              echo "packman: $repo"
+              zypper --non-interactive addrepo --refresh --priority 90 "$url" packman
+              zypper --non-interactive --gpg-auto-import-keys refresh
+              zypper --non-interactive --gpg-auto-import-keys install --from packman \
+                libx264-devel x264 libyuv-devel || true
+              exit 0
+            fi
+          done
+          echo "=== packman has no repository for $VERSION_ID; trying the OSS repo alone ==="
+          zypper --non-interactive refresh
+
+      - name: libraries
+        run: |
+          set -euo pipefail
+          zypper --non-interactive install \
+            gcc gcc-c++ make pkg-config \
+            dbus-1-devel opus-devel \
+            pipewire-devel \
+            libxcb-devel xcb-util-devel \
+            wayland-devel libxkbcommon-devel \
+            libX11-devel \
+            libx264-devel libyuv-devel || true
+          echo "=== what this base provides ==="
+          rpm -qa 2>/dev/null | grep -iE '^(libx264|libyuv|opus|pipewire)' | sort || true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: fetch the shared web UI
+        run: bash build-webui.sh
+
+      - name: build
+        run: |
+          set -euo pipefail
+          cargo build --release
+          out="easystream-linux-amd64-${{ matrix.name }}"
+          cp target/release/easystream "/tmp/$out"
+          chmod +x "/tmp/$out"
+          ls -l "/tmp/$out"
+
+      - name: what this binary links, and what this base provides
+        run: |
+          set -euo pipefail
+          out="/tmp/easystream-linux-amd64-${{ matrix.name }}"
+          echo "=== ABI this binary ASKS FOR ==="
+          nm -D "$out" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+          echo "=== ABI this base PROVIDES ==="
+          for so in /usr/lib64/libx264.so.*; do
+            [ -e "$so" ] || continue
+            printf "  %s: " "$so"
+            nm -D "$so" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || echo "?"
+          done
+          echo "=== glibc floor ==="
+          objdump -T "$out" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+' | sort -Vu | tail -1 || true
+          ldd "$out" 2>&1 | head -12 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.name }}
+          path: /tmp/easystream-linux-amd64-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- FreeBSD ---------------------------------------------------------------
+  #
+  # vmactions/freebsd-vm gives a real FreeBSD VM on the runner rather than a cross-compiler,
+  # for the same reason release.yml builds arm64 on a native arm64 runner: a cross build
+  # cannot run its own tests, and the C shims must link FreeBSD's libxcb, not a Linux one.
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes \
+                           opus dbus at-spi2-core libyuv bash
+          run: |
+            set -e
+            bash build-webui.sh
+            sh ci/patch-freebsd.sh
+            cargo build --release
+            cp target/release/easystream /tmp/easystream-linux-amd64-freebsd
+            ls -l /tmp/easystream-linux-amd64-freebsd
+            echo "=== what it links ==="
+            nm -D /tmp/easystream-linux-amd64-freebsd 2>/dev/null \
+              | grep -oE 'x264_encoder_open_[0-9]+' | head -2 || echo "  (none)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: freebsd
+          path: /tmp/easystream-linux-amd64-freebsd
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- attach everything to the release --------------------------------------
+  release:
+    needs: [apt, arch, fedora, leap, freebsd]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/assets
+          merge-multiple: true
+
+      - name: what is being published, and the ABI each one wants
+        run: |
+          ls -l /tmp/assets
+          echo "--- one line per asset ---"
+          for f in /tmp/assets/easystream-*; do
+            abi=$(nm -D "$f" 2>/dev/null | grep -oE 'x264_encoder_open_[0-9]+' | head -1 || true)
+            printf "%-46s %s\n" "$(basename "$f")" "${abi:-static/none}"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: /tmp/assets/easystream-*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
