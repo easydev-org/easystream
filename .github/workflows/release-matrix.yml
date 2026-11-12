@@ -639,6 +639,29 @@ jobs:
           retention-days: 7
 
   freebsd:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GHOSTBSD SHIPS FreeBSD 14, SO 14 GETS ITS OWN BUILD AND ITS OWN PACKAGE.
+          #
+          # The ABI is a hard gate and `pkg` enforces it:
+          #
+          #     pkg: wrong architecture: FreeBSD:15:amd64 instead of FreeBSD:14:amd64
+          #
+          # - and `pkg add -f` does not override it, because the check is in the installer,
+          # not in a convenience flag. GhostBSD 14.1 reports `pkg config abi` =
+          # `FreeBSD:14:amd64`, and the repository for that ABI is
+          # https://pkg.freebsd.org/FreeBSD:14:amd64/latest/ (200), so a 14.x build resolves
+          # against libraries a 14.x guest actually has.
+          #
+          # 14.1 IS THE RELEASE, NOT 14: the guest reports 14.1-STABLE and vmactions needs a
+          # point release to fetch an image. `FreeBSD:14.1:amd64` does not exist as a
+          # repository, which is the same reason 15.0 and 15.1 both resolve against
+          # `FreeBSD:15` - packages are built per major, and a point release bumps the kernel
+          # and userland without rebuilding ports.
+          - { release: "14.1", key: "freebsd-14" }
+          - { release: "15.1", key: "freebsd-15" }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -658,10 +681,10 @@ jobs:
       #
       # A major version WOULD need its own build (a `FreeBSD:16:amd64` repository with its
       # own ports revision), and this row is where that goes when 16 arrives.
-      - name: build on FreeBSD 15.1
+      - name: build on FreeBSD ${{ matrix.release }}
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "15.1"
+          release: "${{ matrix.release }}"
           prepare: |
             pkg install -y rust pkgconf gmake x264 libxcb libX11 libXtst libXfixes \
                            opus dbus at-spi2-core libyuv bash
@@ -700,7 +723,7 @@ jobs:
       # `dist/` is where package-freebsd.sh writes, and it is inside the checkout.
       - uses: actions/upload-artifact@v4
         with:
-          name: packages-freebsd-15
+          name: packages-${{ matrix.key }}
           path: dist/*.pkg
           if-no-files-found: error
           retention-days: 7

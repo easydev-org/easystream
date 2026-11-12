@@ -85,8 +85,23 @@ licenselogic: single
 licenses: [MIT]
 
 # THE PORTS THESE SHARED OBJECTS COME FROM, WHICH IS NOT ALWAYS THE LIBRARY'S NAME.
+#
+# `x264` IS NOT A PACKAGE NAME ON FreeBSD 15. The port is multimedia/libx264 and the PACKAGE
+# it builds is called `libx264` - checked against the repository's own packagesite.yaml, which
+# is the index a client actually resolves against:
+#
+#     {"name":"libx264","origin":"multimedia/libx264", ...}
+#     {"name":"libyuv","origin":"graphics/libyuv", ...}
+#
+# A dependency on a name that does not exist is not caught by `pkg create` - it writes what it
+# is told - and the failure appears on the user's machine as "no packages available to install
+# matching x264", which names this line rather than the typo in it.
+#
+# GhostBSD's own repository calls the same library `libx264-0.164.3095` (it appends the
+# version). FreeBSD's calls it `libx264`. The origin below is what both agree on, and it is
+# why the dependency is expressed with an origin there rather than swapped per distribution.
 deps: {
-    x264: {origin: "multimedia/libx264", version: "0"},
+    libx264: {origin: "multimedia/libx264", version: "0"},
     libyuv: {origin: "graphics/libyuv", version: "0"},
     opus: {origin: "audio/opus", version: "0"},
     libxcb: {origin: "x11/libxcb", version: "0"},
