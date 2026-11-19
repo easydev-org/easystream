@@ -134,16 +134,34 @@ jobs:
       # before cargo was reached. `pipefail` was not buying anything: every pipeline in this
       # file ends in `|| true` or `|| echo ...`, so the exit status it guards is already
       # handled explicitly. `-e` and `-u` are POSIX and are the two that matter.
+      # THIS STEP CANNOT BE STREAMED, AND THE REASON IS CIRCULAR. `log-stream` is a composite action
+      # whose `run:` blocks are bash; `bash` is one of the things this step installs. MEASURED on
+      # v0.10.2 (run 44479803014): both ubuntu legs sat HERE, not in the streamed step below, for
+      # eighteen minutes - the one step with no live output was the one that hung, so the feature
+      # added for exactly this problem could not see it.
+      #
+      # SO IT IS MADE SHORT INSTEAD OF WATCHABLE:
+      #
+      #   ForceIPv4   THE LIKELY CAUSE. MEASURED: debian-13 finished this same `apt-get update` in
+      #               five seconds while ubuntu-24.04 and ubuntu-26.04 took eighteen minutes each,
+      #               on runners beside each other. Debian's archive has IPv6 reachable from the
+      #               runner; the ubuntu containers resolve an IPv6 address, stall on it, and fall
+      #               back only after the kernel's connect timeout - which is minutes, once per
+      #               mirror. Forcing IPv4 removes the wait rather than shortening it.
+      #
+      #   timeout     AN UPPER BOUND THAT IS NOT THE JOB'S. Fifty minutes of silence is worse than a
+      #               red leg: it cannot be told from a hang, and it holds `release` open. Three
+      #               attempts of two minutes each either work or say so.
       - name: git, before anything else
         run: |
-          apt-get update
-          # BASH, BECAUSE THE NEXT STEP IS A COMPOSITE ACTION.
-          #
-          # `log-stream` runs its command through a `run:` block, and a `run:` block in a
-          # composite action defaults to bash. debian:13 and ubuntu:26.04 ship only dash, so
-          # the action would die with "bash: not found" BEFORE running anything - and the
-          # symptom would be a step that failed instantly for no visible reason.
-          apt-get install -y --no-install-recommends ca-certificates curl git bash
+          set -eu
+          apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 \
+                  -o Acquire::Retries=3 update
+          # BASH, BECAUSE THE NEXT STEP IS A COMPOSITE ACTION. debian:13 and ubuntu:26.04 ship
+          # only dash, so `log-stream` would die with "bash: not found" before running anything.
+          apt-get -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 \
+                  -o Acquire::Retries=3 install -y --no-install-recommends \
+                  ca-certificates curl git bash
 
       - uses: actions/checkout@v4
 
