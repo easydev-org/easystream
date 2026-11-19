@@ -400,8 +400,24 @@ impl Conn {
 }
 
 pub fn serve(port: u16) -> Result<(), String> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| e.to_string())?;
-    println!("easystream est server on 127.0.0.1:{port}");
+    // EVERY ADDRESS, AND THAT IS A CHANGE WITH A REASON.
+    //
+    // This was `127.0.0.1` for as long as the daemon also served HTTP, because the HTTP pipe ran in
+    // the same process and reached the stream over loopback. MEASURED after the HTTP surface was
+    // removed: the daemon still bound loopback, so a client OUTSIDE the guest - easyvm, on the
+    // bridge at 172.30.0.2 - got `connection refused` on a stream that was running perfectly. The
+    // log said so the whole time (`est server on 127.0.0.1:48079`) and it was read as "the old
+    // binary", which it was not: the bind address had never changed.
+    //
+    // THE EXPOSURE IS THE GUEST'S OWN PRIVATE SEGMENT. On a microvm that is 172.30.0.0/24, created
+    // by the daemon that boots the machine and reachable from nothing but that container. There is
+    // no NAT to the guest's est port and no published route: the only outside caller is the program
+    // that started the machine, which is the program that needs it.
+    //
+    // THE ALTERNATIVE WAS AN SSH TUNNEL in the caller. It was written, it worked, and it was 260
+    // lines re-implementing a byte pipe to avoid changing this one address.
+    let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
+    println!("easystream est server on 0.0.0.0:{port}");
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
