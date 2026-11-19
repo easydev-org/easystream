@@ -153,9 +153,6 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       - name: build
         run: |
           set -eu
@@ -236,9 +233,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: arch
-
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
 
       - name: build
         run: |
@@ -324,9 +318,6 @@ jobs:
         with:
           key: manjaro
 
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       - name: build
         run: |
           set -eu
@@ -408,9 +399,6 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       - name: build
         run: |
           set -eu
@@ -485,8 +473,6 @@ jobs:
       #             job dies before the toolchain step does anything useful:
       #
       #                 OCI runtime exec failed: exec: "bash": executable file not found in $PATH
-      #
-      #             and build-webui.sh has a bash shebang too.
       #
       # curl        the toolchain action's installer pipes sh.rustup.rs into a shell.
       # ca-certificates  without it that curl fails verification, which reads as a network
@@ -620,9 +606,6 @@ jobs:
           key: leap-16.0
           workspaces: .
 
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       - name: build
         run: |
           set -eu
@@ -689,9 +672,6 @@ jobs:
             freebsd-version
             echo "=== the package repository this VM uses ==="
             pkg -vv | grep -m2 url
-            # build-webui.sh is the one script here with a bash shebang; everything this
-            # workflow adds is POSIX sh.
-            bash build-webui.sh
             sh ci/patch-freebsd.sh
             cargo build --release
             echo "=== the ABI this binary ASKS FOR ==="
@@ -751,7 +731,20 @@ jobs:
     # published - which is the only tag that exists - would silently overwrite the assets
     # at least one guest is running today. A push of `v*` publishes; a dispatch has to say
     # so explicitly.
-    if: github.event_name == 'push' || inputs.publish
+    # PUBLISH WHAT SUCCEEDED, EVEN IF ONE PLATFORM DID NOT.
+    #
+    # THIS WAS `github.event_name == 'push' || inputs.publish`, WHICH IS ABOUT WHO MAY PUBLISH and
+    # said nothing about what to do when one matrix leg fails. MEASURED on v0.10.1: `ubuntu-26.04`
+    # sat in its own runner's apt step for forty minutes while eight other legs had already finished,
+    # and `needs:` held the whole release - so debian-13, which is the package this repository's own
+    # guest installs, was built and never published.
+    #
+    # `always()` LETS THE JOB RUN after a failed need; `!cancelled()` keeps a manually cancelled run
+    # from publishing a partial set. The packages that exist get released, and the one that does not
+    # is visible as a red leg rather than as a silently missing artifact.
+    if: |
+      always() && !cancelled() &&
+      (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

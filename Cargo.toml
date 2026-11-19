@@ -2,7 +2,7 @@
 name = "easystream"
 version = "0.1.0"
 edition = "2021"
-description = "easystream daemon (Linux) — est:// video/input + HTTP a11y/webui"
+description = "easystream daemon (Linux) — est:// video, input and a11y"
 
 [[bin]]
 name = "easystream"

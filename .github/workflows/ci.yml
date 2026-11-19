@@ -44,10 +44,6 @@ jobs:
             libxcb-xfixes0-dev libxcb-render0-dev \
             libwayland-dev libxkbcommon-dev
 
-      # The SPA is fetched, not vendored, and build.rs inlines it.
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       # fmt is advisory for the same reason: reformatting the tree is a separate
       # change from whatever the PR is about.
       - run: cargo fmt --all -- --check

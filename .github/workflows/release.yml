@@ -66,11 +66,6 @@ jobs:
             libxcb-xfixes0-dev libxcb-render0-dev \
             libwayland-dev libxkbcommon-dev
 
-      # The SPA lives in another repository and build.rs inlines it with
-      # include_str!. build-webui.sh just downloads a tarball, so no Node needed.
-      - name: fetch the shared web UI
-        run: bash build-webui.sh
-
       # Native: the tests really execute here.
       - name: test
         run: cargo test --release
