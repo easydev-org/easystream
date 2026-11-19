@@ -44,7 +44,7 @@
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = with pkgs; [
               x264 libopus libyuv libxcb
-              xorg.libX11 libxkbcommon wayland dbus pipewire
+              libx11 libxkbcommon wayland dbus pipewire
               stdenv.cc.cc.lib
             ];
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" [
@@ -179,7 +179,7 @@
         default = pkgs.mkShell {
           buildInputs = with pkgs; [
             cargo rustc pkg-config
-            x264 libopus libyuv libxcb xorg.libX11 libxkbcommon wayland dbus pipewire
+            x264 libopus libyuv libxcb libx11 libxkbcommon wayland dbus pipewire
           ];
         };
       });
