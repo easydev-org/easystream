@@ -346,6 +346,8 @@ const T_BUTTON: u8 = 0x11;
 const T_SCROLL: u8 = 0x12;
 const T_KEY: u8 = 0x13;
 const T_TEXT: u8 = 0x14;
+const T_SHOT_REQ: u8 = 0x40;
+const T_SHOT_RESP: u8 = 0x41;
 const T_CLIP_GET: u8 = 0x30;
 const T_CLIP_DATA: u8 = 0x31;
 const T_CLIP_SET: u8 = 0x32;
@@ -363,7 +365,7 @@ const T_PONG: u8 = 0x51;
 pub struct Conn {
     stream: Mutex<TcpStream>,
     /// Access mode for THIS connection (View = read-only). Set by the Auth
-    /// frame (0x03) or inherited from the HTTP pipe's token.
+    /// frame (0x03); a connection that never sends one is a viewer.
     mode: std::sync::atomic::AtomicU8,
     /// Whether this connection wants Audio frames. Off until the client sends
     /// AudioReq (0x06), so a viewer that does not want audio costs nothing.
@@ -1152,6 +1154,47 @@ fn u16at(b: &[u8], o: usize) -> i16 {
     i16::from_be_bytes([b[o], b[o + 1]])
 }
 
+/// shot_png captures the screen and encodes it as a PNG.
+///
+/// A FRESH CAPTURE HANDLE PER CALL, because screenshots are rare one-shots: this is the code the
+/// HTTP `/a11y/screenshot` route used, moved rather than rewritten so the two could not drift while
+/// both existed.
+///
+/// `region` is "" for the whole screen or "x,y,w,h"; a region that falls outside the capture is
+/// clamped rather than refused, because a viewer asking for a sliver of a resized screen wants a
+/// picture, not an error.
+fn shot_png(region: &str) -> Result<Vec<u8>, String> {
+    let cap = Capture::open()?;
+    let (w, h) = cap.size();
+    let bgra = cap.grab()?;
+    if region.is_empty() {
+        return Ok(crate::png::encode_bgra(w, h, &bgra));
+    }
+    let n: Vec<i32> = region
+        .split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect();
+    if n.len() != 4 {
+        return Err(format!("region must be x,y,w,h; got {region:?}"));
+    }
+    let (x, y) = (n[0].max(0) as u32, n[1].max(0) as u32);
+    let rw = (n[2].max(1) as u32).min(w.saturating_sub(x));
+    let rh = (n[3].max(1) as u32).min(h.saturating_sub(y));
+    if rw == 0 || rh == 0 {
+        return Err("region is outside the screen".into());
+    }
+    // Copy the sub-rectangle row by row: the source is tightly packed BGRA.
+    let mut crop = Vec::with_capacity((rw * rh * 4) as usize);
+    for row in 0..rh {
+        let start = (((y + row) * w + x) * 4) as usize;
+        let end = start + (rw * 4) as usize;
+        if end <= bgra.len() {
+            crop.extend_from_slice(&bgra[start..end]);
+        }
+    }
+    Ok(crate::png::encode_bgra(rw, rh, &crop))
+}
+
 fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
     // Auth frame: the client presents its token; we set the connection's mode.
     if typ == T_AUTH {
@@ -1299,11 +1342,12 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
             });
         }
         T_CLIP_GET => {
-            // Use the REAL system clipboard (the same backend the HTTP /a11y/
-            // clipboard route uses): wl-paste / xclip / xsel on Linux, Win32 on
-            // The old per-connection String was a private buffer that
-            // nothing else could see, which is why the buttons looked dead.
-            let text = crate::http::clipboard_get().unwrap_or_default();
+            // Use the REAL system clipboard: wl-paste / xclip / xsel on Linux.
+            // It used to be shared with an HTTP route; when that went, the
+            // functions moved to `clipboard.rs` and this stayed the same call.
+            // The old per-connection String was a private buffer that nothing
+            // else could see, which is why the buttons looked dead.
+            let text = crate::clipboard::clipboard_get().unwrap_or_default();
             let mut p = Vec::with_capacity(8 + text.len());
             p.extend_from_slice(&0u32.to_be_bytes());
             p.extend_from_slice(&(text.len() as u32).to_be_bytes());
@@ -1317,9 +1361,39 @@ fn dispatch(conn: &Arc<Conn>, typ: u8, b: &[u8]) -> Result<(), String> {
                 let n = u32::from_be_bytes([b[4], b[5], b[6], b[7]]) as usize;
                 if b.len() >= 8 + n {
                     let text = String::from_utf8_lossy(&b[8..8 + n]).to_string();
-                    let _ = crate::http::clipboard_set(&text);
+                    let _ = crate::clipboard::clipboard_set(&text);
                 }
             }
+        }
+        T_SHOT_REQ => {
+            // THE SCREENSHOT MOVED HERE FROM THE HTTP SURFACE, AND IT HAD TO: it was the ONE
+            // capability the HTTP listener provided that `est` did not implement, so removing the
+            // listener would have quietly removed screenshots.
+            //
+            // EST.md: u32 id, u8 regionLen, region[regionLen], where "" is the whole screen and a
+            // region is "x,y,w,h". The reply is u32 id, u32 pngLen, png[pngLen].
+            let id = if b.len() >= 4 {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                0
+            };
+            let region = if b.len() >= 5 {
+                let n = b[4] as usize;
+                if b.len() >= 5 + n {
+                    String::from_utf8_lossy(&b[5..5 + n]).to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            let png = shot_png(&region).unwrap_or_default();
+            let mut p = Vec::with_capacity(8 + png.len());
+            p.extend_from_slice(&id.to_be_bytes());
+            p.extend_from_slice(&(png.len() as u32).to_be_bytes());
+            p.extend_from_slice(&png);
+            conn.write_frame(T_SHOT_RESP, &p)
+                .map_err(|e| e.to_string())?;
         }
         T_PING => conn.write_frame(T_PONG, b).map_err(|e| e.to_string())?,
         _ => {}

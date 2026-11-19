@@ -8,10 +8,10 @@
 mod a11y;
 mod auth;
 mod audio;
+mod clipboard;
 mod opus;
 mod atspi;
 mod est;
-mod http;
 mod png;
 
 // The Linux backends (X11 / Wayland) use C shims + libx264.
@@ -37,23 +37,20 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(48079);
-    let http_port: u16 = env::var("EAZYSTREAM_HTTP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(48078);
     let args: Vec<String> = env::args().collect();
     // Diagnostic one-shots (mirror the C# daemon's `wgctest`).
     if args.len() >= 2 && args[1] == "serve" || args.len() < 2 {
-        // The HTTP surface (webui + /est/ws pipe + /a11y) runs alongside the est
-        // listener in the SAME process, so the daemon is the only thing a viewer
-        // or the worker connects to.
-        let a11y = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let a11y_http = std::sync::Arc::clone(&a11y);
-        std::thread::spawn(move || {
-            if let Err(e) = http::serve(http_port, port, a11y_http) {
-                eprintln!("http: {e}");
-            }
-        });
+        // ONE LISTENER, ONE PROTOCOL.
+        //
+        // THIS USED TO ALSO START AN HTTP SERVER on 48078 that served the web UI, the `/est/ws`
+        // byte pipe and the `/a11y/*` API. All of that is gone, and the reason is a division of
+        // labour rather than a feature cut: `est://` already carries every one of those operations
+        // as a message type (video 0x02, input 0x10-0x14, a11y 0x20-0x27, clipboard 0x30-0x32,
+        // screenshot 0x40-0x41), so the HTTP surface was a SECOND way to say the same things - and
+        // a second UI to keep in step with them.
+        //
+        // The browser belongs to whoever owns the machine, and here that is easyvm. This daemon's
+        // job is to capture a screen and answer on one socket.
         if let Err(e) = est::serve(port) {
             eprintln!("easystream: {e}");
             std::process::exit(1);
