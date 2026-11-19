@@ -70,6 +70,16 @@ on:
 
 permissions:
   contents: write
+  # `checks: write` IS WHAT PUBLISHES THE LIVE LOG, AND IT IS NOT GRANTED BY DEFAULT.
+  #
+  # MEASURED on v0.10.2 (run 44479803014): every streamed step printed
+  #
+  #     log-stream: no check run; running the command without publishing
+  #
+  # and the command still ran - so the feature was a silent no-op and looked like a working
+  # integration. Without this line the POST is refused, and a stream that cannot publish still runs
+  # the command by design, which is exactly why there is no error to notice.
+  checks: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -193,7 +203,10 @@ jobs:
           # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
           # leap and freebsd have no matrix, and four check runs all named "solo" would
           # overwrite each other.
-          name: ${{ github.job }}-build-live
+          # UNIQUE PER LEG. `github.job` is "apt" for ALL THREE apt legs, so naming by it alone
+          # means ubuntu-26.04, ubuntu-24.04 and debian-13 overwrite each other's output. matrix.name
+          # is unique where a matrix exists and null where it does not, so the fallback covers both.
+          name: ${{ matrix.name || github.job }}-build-live
           interval: "10"
           max_bytes: "60000"
           command: |
@@ -286,7 +299,10 @@ jobs:
           # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
           # leap and freebsd have no matrix, and four check runs all named "solo" would
           # overwrite each other.
-          name: ${{ github.job }}-build-live
+          # UNIQUE PER LEG. `github.job` is "apt" for ALL THREE apt legs, so naming by it alone
+          # means ubuntu-26.04, ubuntu-24.04 and debian-13 overwrite each other's output. matrix.name
+          # is unique where a matrix exists and null where it does not, so the fallback covers both.
+          name: ${{ matrix.name || github.job }}-build-live
           interval: "10"
           max_bytes: "60000"
           command: |
@@ -382,7 +398,10 @@ jobs:
           # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
           # leap and freebsd have no matrix, and four check runs all named "solo" would
           # overwrite each other.
-          name: ${{ github.job }}-build-live
+          # UNIQUE PER LEG. `github.job` is "apt" for ALL THREE apt legs, so naming by it alone
+          # means ubuntu-26.04, ubuntu-24.04 and debian-13 overwrite each other's output. matrix.name
+          # is unique where a matrix exists and null where it does not, so the fallback covers both.
+          name: ${{ matrix.name || github.job }}-build-live
           interval: "10"
           max_bytes: "60000"
           command: |
@@ -475,7 +494,10 @@ jobs:
           # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
           # leap and freebsd have no matrix, and four check runs all named "solo" would
           # overwrite each other.
-          name: ${{ github.job }}-build-live
+          # UNIQUE PER LEG. `github.job` is "apt" for ALL THREE apt legs, so naming by it alone
+          # means ubuntu-26.04, ubuntu-24.04 and debian-13 overwrite each other's output. matrix.name
+          # is unique where a matrix exists and null where it does not, so the fallback covers both.
+          name: ${{ matrix.name || github.job }}-build-live
           interval: "10"
           max_bytes: "60000"
           command: |
@@ -694,7 +716,10 @@ jobs:
           # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
           # leap and freebsd have no matrix, and four check runs all named "solo" would
           # overwrite each other.
-          name: ${{ github.job }}-build-live
+          # UNIQUE PER LEG. `github.job` is "apt" for ALL THREE apt legs, so naming by it alone
+          # means ubuntu-26.04, ubuntu-24.04 and debian-13 overwrite each other's output. matrix.name
+          # is unique where a matrix exists and null where it does not, so the fallback covers both.
+          name: ${{ matrix.name || github.job }}-build-live
           interval: "10"
           max_bytes: "60000"
           command: |
