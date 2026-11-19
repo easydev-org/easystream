@@ -127,7 +127,13 @@ jobs:
       - name: git, before anything else
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git
+          # BASH, BECAUSE THE NEXT STEP IS A COMPOSITE ACTION.
+          #
+          # `log-stream` runs its command through a `run:` block, and a `run:` block in a
+          # composite action defaults to bash. debian:13 and ubuntu:26.04 ship only dash, so
+          # the action would die with "bash: not found" BEFORE running anything - and the
+          # symptom would be a step that failed instantly for no visible reason.
+          apt-get install -y --no-install-recommends ca-certificates curl git bash
 
       - uses: actions/checkout@v4
 
@@ -137,15 +143,40 @@ jobs:
       # THESE NAMES WERE VERIFIED on the Ubuntu 26.04 guest this repository already runs,
       # where libx264-dev, libxcb-xtest0-dev and libyuv-dev all resolved by exactly these
       # names. Debian 12 and 13 use the same apt archive layout.
+      # STREAMED, BECAUSE THIS IS THE STEP THAT SITS FOR FORTY MINUTES AND SHOWS NOTHING.
+      #
+      # MEASURED on v0.10.1: `ubuntu-26.04` spent forty minutes in this step while eight other legs
+      # finished, and the Actions log did not say a word about it until it ended - so "still working"
+      # and "stuck" looked identical from outside. `easyactions/log-stream` publishes the command's
+      # output to a CHECK RUN every ten seconds, which is readable while the step is still running.
       - name: libraries from this base's own apt
-        run: |
-          apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libdbus-1-dev libx264-dev libyuv-dev libopus-dev \
-            libpipewire-0.3-dev libspa-0.2-dev \
-            libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev \
-            libxcb-xfixes0-dev libxcb-render0-dev \
-            libwayland-dev libxkbcommon-dev
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          name: ${{ matrix.name }}-apt-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            # `--fix-missing` AND A RETRY: a mirror that answers 502 for one file is the other way
+            # this step hangs, and MEASURED it does happen (`libgraphite2-3 ... 502 Bad Gateway`).
+            for attempt in 1 2 3; do
+              apt-get update -qq || true
+              if apt-get install -y --no-install-recommends \
+                   build-essential pkg-config \
+                   libdbus-1-dev libx264-dev libyuv-dev libopus-dev \
+                   libpipewire-0.3-dev libspa-0.2-dev \
+                   libxcb1-dev libxcb-xtest0-dev libxcb-shm0-dev \
+                   libxcb-xfixes0-dev libxcb-render0-dev \
+                   libwayland-dev libxkbcommon-dev; then
+                echo "=== apt: all libraries installed (attempt $attempt) ==="
+                exit 0
+              fi
+              echo "=== apt attempt $attempt failed; retrying ==="
+              sleep 10
+            done
+            echo "=== apt could not install the libraries in three attempts ==="
+            exit 1
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -153,11 +184,23 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
+      # STREAMED FOR THE SAME REASON AS THE apt STEP: a `cargo build --release` of this tree is
+      # minutes of silence in the Actions log, and silence is indistinguishable from a hang.
       - name: build
-        run: |
-          set -eu
-          cargo build --release
-          sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
+          # leap and freebsd have no matrix, and four check runs all named "solo" would
+          # overwrite each other.
+          name: ${{ github.job }}-build-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            cargo build --release
+            sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
+            ls -l dist/
 
       # THE VERDICT IS IN THESE LINES, and they are what a future reader needs: which x264
       # ABI this binary asks for, which this base provides, and the glibc floor it imposes.
@@ -234,11 +277,23 @@ jobs:
         with:
           key: arch
 
+      # STREAMED FOR THE SAME REASON AS THE apt STEP: a `cargo build --release` of this tree is
+      # minutes of silence in the Actions log, and silence is indistinguishable from a hang.
       - name: build
-        run: |
-          set -eu
-          cargo build --release
-          sh ci/package.sh "arch" "${GITHUB_REF_NAME:-0.0.0}"
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
+          # leap and freebsd have no matrix, and four check runs all named "solo" would
+          # overwrite each other.
+          name: ${{ github.job }}-build-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            cargo build --release
+            sh ci/package.sh "arch" "${GITHUB_REF_NAME:-0.0.0}"
+            ls -l dist/
 
       - name: what this binary links, and what this base provides
         run: |
@@ -318,11 +373,23 @@ jobs:
         with:
           key: manjaro
 
+      # STREAMED FOR THE SAME REASON AS THE apt STEP: a `cargo build --release` of this tree is
+      # minutes of silence in the Actions log, and silence is indistinguishable from a hang.
       - name: build
-        run: |
-          set -eu
-          cargo build --release
-          sh ci/package.sh "manjaro" "${GITHUB_REF_NAME:-0.0.0}"
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
+          # leap and freebsd have no matrix, and four check runs all named "solo" would
+          # overwrite each other.
+          name: ${{ github.job }}-build-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            cargo build --release
+            sh ci/package.sh "manjaro" "${GITHUB_REF_NAME:-0.0.0}"
+            ls -l dist/
 
       - name: what this binary links, and what this base provides
         run: |
@@ -399,11 +466,23 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
+      # STREAMED FOR THE SAME REASON AS THE apt STEP: a `cargo build --release` of this tree is
+      # minutes of silence in the Actions log, and silence is indistinguishable from a hang.
       - name: build
-        run: |
-          set -eu
-          cargo build --release
-          sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
+          # leap and freebsd have no matrix, and four check runs all named "solo" would
+          # overwrite each other.
+          name: ${{ github.job }}-build-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            cargo build --release
+            sh ci/package.sh "${{ matrix.name }}" "${GITHUB_REF_NAME:-0.0.0}"
+            ls -l dist/
 
       - name: what this binary links, and what this base provides
         run: |
@@ -606,11 +685,23 @@ jobs:
           key: leap-16.0
           workspaces: .
 
+      # STREAMED FOR THE SAME REASON AS THE apt STEP: a `cargo build --release` of this tree is
+      # minutes of silence in the Actions log, and silence is indistinguishable from a hang.
       - name: build
-        run: |
-          set -eu
-          cargo build --release
-          sh ci/package.sh "leap-16.0" "${GITHUB_REF_NAME:-0.0.0}"
+        uses: easydev-org/easyactions/log-stream@main
+        with:
+          token: ${{ github.token }}
+          # `github.job` IS UNIQUE BY DEFINITION and needs no matrix fallback: arch, manjaro,
+          # leap and freebsd have no matrix, and four check runs all named "solo" would
+          # overwrite each other.
+          name: ${{ github.job }}-build-live
+          interval: "10"
+          max_bytes: "60000"
+          command: |
+            set -eu
+            cargo build --release
+            sh ci/package.sh "leap-16.0" "${GITHUB_REF_NAME:-0.0.0}"
+            ls -l dist/
 
       - name: what this binary links, and what this base provides
         run: |
